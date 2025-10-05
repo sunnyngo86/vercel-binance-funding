@@ -293,9 +293,9 @@ module.exports = async (req, res) => {
       const positionValue = realAmount * currentPrice;
       
       const side = pos.side || (pos.contracts > 0 ? 'long' : 'short');
-      let unrealizedPnl = (currentPrice - avgPrice) * realAmount;
+      let unrealizedPnl = (currentPrice - (pos.entryPrice || 0)) * realAmount;
       if (side.toLowerCase().includes('short')) {
-        unrealizedPnl = (avgPrice - currentPrice) * realAmount;
+        unrealizedPnl = ((pos.entryPrice || 0) - currentPrice) * realAmount;
       }
       
       result.push({
