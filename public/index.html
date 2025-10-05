@@ -6,7 +6,8 @@
   <title>Funding Fee Overview</title>
   <style>
     body { font-family: sans-serif; padding: 2rem; background: #f9f9f9; }
-    table { border-collapse: collapse; width: 100%; }
+    h2, h3 { margin-top: 0; }
+    table { border-collapse: collapse; width: 100%; margin-top: 1em; }
     th, td { padding: 8px 12px; border: 1px solid #ccc; }
     th { background: #333; color: white; }
     tr:nth-child(even) { background: #f2f2f2; }
@@ -19,13 +20,44 @@
     td.total-cell.negative { color: red; }
 
     #loadTime { font-weight: bold; font-size: 1rem; margin-bottom: 1em; }
-    #summary { margin-top: 1em; font-size: 1.1rem; font-weight: bold; }
+    #equityTable { width: auto; min-width: 600px; }
+    #equityTable th { background: #2b5; }
+    #equityTable td { text-align: right; }
+    #equityTable td:first-child { text-align: left; font-weight: bold; }
+    #equityTable tfoot td { font-weight: bold; background: #ddd; }
+
+    .equity-up { color: green; }
+    .equity-down { color: red; }
+    .equity-same { color: #555; }
+
+    #sumRow td { font-weight: bold; background: #ddd; }
   </style>
 </head>
 <body>
   <h2>Funding Fee Overview</h2>
   <p id="loadTime">⏱ Loading... <span id="timer">0s</span></p>
 
+  <!-- === EQUITY SUMMARY TABLE === -->
+  <h3>💰 Equity Summary (Per Exchange)</h3>
+  <table id="equityTable">
+    <thead>
+      <tr>
+        <th>Exchange</th>
+        <th>Futures</th>
+        <th>Funding/Spot</th>
+        <th>Total Equity</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+    <tfoot>
+      <tr>
+        <td>Total Equity (All Exchanges)</td>
+        <td colspan="3" id="totalEquityAll" class="right"></td>
+      </tr>
+    </tfoot>
+  </table>
+
+  <!-- === FUNDING DETAILS TABLE === -->
   <table id="fundingTable">
     <thead>
       <tr>
@@ -44,8 +76,8 @@
       </tr>
     </thead>
     <tbody></tbody>
-    <tfoot>
-      <tr style="background:#ddd; font-weight:bold;">
+    <tfoot id="sumRow">
+      <tr>
         <td colspan="5" style="text-align:right;">SUM TOTAL:</td>
         <td id="sumPositionValue" class="right"></td>
         <td id="sumUnrealizedPnl" class="right"></td>
@@ -56,7 +88,7 @@
   </table>
 
   <script>
-    // live timer counter
+    // Live timer
     let sec = 0;
     const timerEl = document.getElementById('timer');
     const timer = setInterval(() => { sec++; timerEl.textContent = sec + 's'; }, 1000);
@@ -67,7 +99,6 @@
       const [y, timeStr] = yAndRest.split(', ');
       return new Date(`${y}-${m}-${d}T${convertTo24Hr(timeStr)}+08:00`);
     }
-
     function convertTo24Hr(timeStr) {
       const [time, modifier] = timeStr.split(' ');
       let [hours, minutes, seconds] = time.split(':').map(Number);
@@ -75,7 +106,6 @@
       if (modifier?.toLowerCase() === 'am' && hours === 12) hours = 0;
       return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds || 0).padStart(2, '0')}`;
     }
-
     function getHoldingDays(startStr) {
       const startTime = parseSGDateString(startStr);
       const now = new Date();
@@ -92,7 +122,41 @@
         const loadSeconds = ((endTime - startTime) / 1000).toFixed(2);
         document.getElementById('loadTime').textContent = `✅ Loaded in ${loadSeconds}s`;
 
-        if (data.success && Array.isArray(data.result)) {
+        if (data.success) {
+          // === EQUITY SUMMARY ===
+          const equityTbody = document.querySelector('#equityTable tbody');
+          let totalAllEquity = 0;
+          for (const [exchange, eq] of Object.entries(data.equityOverview)) {
+            const tr = document.createElement('tr');
+            tr.innerHTML = `
+              <td>${exchange.toUpperCase()}</td>
+              <td>${eq.futures?.toFixed(2) || 0}</td>
+              <td>${eq.funding?.toFixed(2) || 0}</td>
+              <td>${eq.total?.toFixed(2) || 0}</td>
+            `;
+            equityTbody.appendChild(tr);
+            totalAllEquity += eq.total || 0;
+          }
+
+          // Compare with last total
+          const totalCell = document.getElementById('totalEquityAll');
+          const lastTotal = parseFloat(localStorage.getItem('lastTotalEquity') || 0);
+          localStorage.setItem('lastTotalEquity', totalAllEquity);
+          totalCell.textContent = totalAllEquity.toFixed(2);
+
+          if (lastTotal === 0) {
+            totalCell.className = 'right equity-same';
+          } else if (totalAllEquity > lastTotal) {
+            totalCell.className = 'right equity-up';
+            totalCell.textContent += ' 🔼';
+          } else if (totalAllEquity < lastTotal) {
+            totalCell.className = 'right equity-down';
+            totalCell.textContent += ' 🔻';
+          } else {
+            totalCell.className = 'right equity-same';
+          }
+
+          // === FUNDING DETAILS ===
           const tbody = document.querySelector('#fundingTable tbody');
           let totalFundingSum = 0;
           let totalPositionValueSum = 0;
@@ -103,7 +167,6 @@
             if (!grouped[item.symbol]) grouped[item.symbol] = [];
             grouped[item.symbol].push(item);
           });
-
           const sortedSymbols = Object.keys(grouped).sort();
 
           for (const symbol of sortedSymbols) {
@@ -131,12 +194,12 @@
 
               row.innerHTML += `
                 <td class="center">${entry.source}</td>
-                <td class="right">${parseFloat(entry.currentPrice).toFixed(4)}</td>
+                <td class="right">${parseFloat(entry.currentPrice || 0).toFixed(4)}</td>
                 <td class="center">${entry.positionSize}</td>
-                <td class="right">${parseFloat(entry.positionValue).toFixed(2)}</td>
-                <td class="right">${parseFloat(entry.unrealizedPnl).toFixed(2)}</td>
+                <td class="right">${parseFloat(entry.positionValue || 0).toFixed(2)}</td>
+                <td class="right">${parseFloat(entry.unrealizedPnl || 0).toFixed(2)}</td>
                 <td class="center">${entry.count}</td>
-                <td class="right">${parseFloat(entry.totalFunding).toFixed(2)}</td>
+                <td class="right">${parseFloat(entry.totalFunding || 0).toFixed(2)}</td>
                 <td class="center">${getHoldingDays(entry.startTime)}</td>
                 <td class="center">${entry.startTime}</td>
                 <td class="center">${entry.endTime}</td>
@@ -145,7 +208,6 @@
             });
           }
 
-          // fill summary totals
           document.getElementById('sumPositionValue').textContent = totalPositionValueSum.toFixed(2);
           document.getElementById('sumUnrealizedPnl').textContent = totalUnrealizedPnlSum.toFixed(2);
           document.getElementById('sumTotalFunding').textContent = totalFundingSum.toFixed(2);
