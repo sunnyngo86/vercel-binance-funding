@@ -19,33 +19,13 @@
     td.total-cell.negative { color: red; }
 
     #loadTime { font-weight: bold; font-size: 1rem; margin-bottom: 1em; }
-    #equityTable { margin-bottom: 2rem; }
+    #summary { margin-top: 1em; font-size: 1.1rem; font-weight: bold; }
   </style>
 </head>
 <body>
   <h2>Funding Fee Overview</h2>
-  <p id="loadTime">⏱ Loading... 0s</p>
+  <p id="loadTime">⏱ Loading... <span id="timer">0s</span></p>
 
-  <!-- Equity Summary Table -->
-  <table id="equityTable">
-    <thead>
-      <tr>
-        <th>Exchange</th>
-        <th>Futures Equity</th>
-        <th>Funding Equity</th>
-        <th>Total Equity</th>
-      </tr>
-    </thead>
-    <tbody></tbody>
-    <tfoot>
-      <tr>
-        <td colspan="3" style="text-align:right;font-weight:bold;">Total Equity:</td>
-        <td id="totalEquity" style="font-weight:bold;"></td>
-      </tr>
-    </tfoot>
-  </table>
-
-  <!-- Funding Overview Table -->
   <table id="fundingTable">
     <thead>
       <tr>
@@ -64,15 +44,23 @@
       </tr>
     </thead>
     <tbody></tbody>
+    <tfoot>
+      <tr style="background:#ddd; font-weight:bold;">
+        <td colspan="5" style="text-align:right;">SUM TOTAL:</td>
+        <td id="sumPositionValue" class="right"></td>
+        <td id="sumUnrealizedPnl" class="right"></td>
+        <td colspan="2" id="sumTotalFunding" class="right"></td>
+        <td colspan="3"></td>
+      </tr>
+    </tfoot>
   </table>
 
   <script>
+    // live timer counter
+    let sec = 0;
+    const timerEl = document.getElementById('timer');
+    const timer = setInterval(() => { sec++; timerEl.textContent = sec + 's'; }, 1000);
     const startTime = performance.now();
-    let secondsElapsed = 0;
-    const timer = setInterval(() => {
-      secondsElapsed++;
-      document.getElementById('loadTime').textContent = `⏱ Loading... ${secondsElapsed}s`;
-    }, 1000);
 
     function parseSGDateString(dateStr) {
       const [d, m, yAndRest] = dateStr.split('/');
@@ -83,9 +71,9 @@
     function convertTo24Hr(timeStr) {
       const [time, modifier] = timeStr.split(' ');
       let [hours, minutes, seconds] = time.split(':').map(Number);
-      if (modifier.toLowerCase() === 'pm' && hours !== 12) hours += 12;
-      if (modifier.toLowerCase() === 'am' && hours === 12) hours = 0;
-      return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+      if (modifier?.toLowerCase() === 'pm' && hours !== 12) hours += 12;
+      if (modifier?.toLowerCase() === 'am' && hours === 12) hours = 0;
+      return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds || 0).padStart(2, '0')}`;
     }
 
     function getHoldingDays(startStr) {
@@ -104,36 +92,26 @@
         const loadSeconds = ((endTime - startTime) / 1000).toFixed(2);
         document.getElementById('loadTime').textContent = `✅ Loaded in ${loadSeconds}s`;
 
-        // --- EQUITY SUMMARY ---
-        if (data.equityOverview) {
-          const tbody = document.querySelector('#equityTable tbody');
-          tbody.innerHTML = '';
-          for (const [ex, val] of Object.entries(data.equityOverview)) {
-            const row = document.createElement('tr');
-            row.innerHTML = `
-              <td>${ex.toUpperCase()}</td>
-              <td class="right">${val.futures.toFixed(2)}</td>
-              <td class="right">${val.funding.toFixed(2)}</td>
-              <td class="right"><b>${val.total.toFixed(2)}</b></td>
-            `;
-            tbody.appendChild(row);
-          }
-          document.getElementById('totalEquity').textContent = data.totalEquity.toFixed(2);
-        }
-
-        // --- FUNDING OVERVIEW ---
         if (data.success && Array.isArray(data.result)) {
           const tbody = document.querySelector('#fundingTable tbody');
+          let totalFundingSum = 0;
+          let totalPositionValueSum = 0;
+          let totalUnrealizedPnlSum = 0;
+
           const grouped = {};
           data.result.forEach(item => {
             if (!grouped[item.symbol]) grouped[item.symbol] = [];
             grouped[item.symbol].push(item);
           });
+
           const sortedSymbols = Object.keys(grouped).sort();
 
           for (const symbol of sortedSymbols) {
             const entries = grouped[symbol];
             const symbolTotal = entries.reduce((sum, e) => sum + parseFloat(e.totalFunding), 0);
+            totalFundingSum += symbolTotal;
+            totalPositionValueSum += entries.reduce((s, e) => s + (parseFloat(e.positionValue) || 0), 0);
+            totalUnrealizedPnlSum += entries.reduce((s, e) => s + (parseFloat(e.unrealizedPnl) || 0), 0);
 
             entries.forEach((entry, idx) => {
               const row = document.createElement('tr');
@@ -166,13 +144,18 @@
               tbody.appendChild(row);
             });
           }
+
+          // fill summary totals
+          document.getElementById('sumPositionValue').textContent = totalPositionValueSum.toFixed(2);
+          document.getElementById('sumUnrealizedPnl').textContent = totalUnrealizedPnlSum.toFixed(2);
+          document.getElementById('sumTotalFunding').textContent = totalFundingSum.toFixed(2);
         } else {
           document.getElementById('loadTime').textContent = '❌ Failed to load data.';
         }
       })
       .catch(err => {
-        console.error(err);
         clearInterval(timer);
+        console.error(err);
         document.getElementById('loadTime').textContent = '❌ Error loading data.';
       });
   </script>
