@@ -289,12 +289,19 @@ module.exports = async (req, res) => {
       // Fetch PnL & value using actual token size
       const ticker = await mexc.fetchTicker(pos.symbol);
       const currentPrice = ticker.last || 0;
-      const unrealizedPnl = (currentPrice - (pos.entryPrice || 0)) * realAmount;
+      //const unrealizedPnl = (currentPrice - (pos.entryPrice || 0)) * realAmount;
       const positionValue = realAmount * currentPrice;
+      
+      const side = pos.side || (pos.contracts > 0 ? 'long' : 'short');
+      let unrealizedPnl = (currentPrice - avgPrice) * realAmount;
+      if (side.toLowerCase().includes('short')) {
+        unrealizedPnl = (avgPrice - currentPrice) * realAmount;
+      }
       
       result.push({
         source: 'mexc',
         symbol: cleanSymbol,
+        currentPrice,
         positionSize: realAmount,  // ✅ use real token amount
         positionValue,
         unrealizedPnl,
