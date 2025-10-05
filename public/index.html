@@ -6,7 +6,7 @@
   <title>Funding Fee Overview</title>
   <style>
     body { font-family: sans-serif; padding: 2rem; background: #f9f9f9; }
-    table { border-collapse: collapse; width: 100%; margin-bottom: 2rem; }
+    table { border-collapse: collapse; width: 100%; }
     th, td { padding: 8px 12px; border: 1px solid #ccc; }
     th { background: #333; color: white; }
     tr:nth-child(even) { background: #f2f2f2; }
@@ -17,34 +17,25 @@
     td.total-cell { font-weight: bold; text-align: right; }
     td.total-cell.positive { color: green; }
     td.total-cell.negative { color: red; }
+
     #loadTime { font-weight: bold; font-size: 1rem; margin-bottom: 1em; }
+    #equitySummary {
+      margin-bottom: 1.5em;
+      background: #fff;
+      border: 1px solid #ccc;
+      padding: 1em;
+      border-radius: 8px;
+    }
+    #equitySummary table { width: auto; margin: 0; }
   </style>
 </head>
 <body>
   <h2>Funding Fee Overview</h2>
-  <p id="loadTime">⏱ Loading...</p>
+  <p id="loadTime">⏱ Loading... <span id="liveTimer">0</span>s</p>
 
-  <!-- New Equity Overview Table -->
-  <h3>Equity Overview</h3>
-  <table id="equityTable">
-    <thead>
-      <tr>
-        <th>Exchange</th>
-        <th>Futures</th>
-        <th>Funding</th>
-        <th>Total Equity</th>
-      </tr>
-    </thead>
-    <tbody></tbody>
-    <tfoot>
-      <tr>
-        <th colspan="3">Grand Total</th>
-        <th id="grandTotal" class="right"></th>
-      </tr>
-    </tfoot>
-  </table>
+  <!-- Summary Equity Table -->
+  <div id="equitySummary"></div>
 
-  <!-- Existing Funding Details Table -->
   <table id="fundingTable">
     <thead>
       <tr>
@@ -52,6 +43,7 @@
         <th>Total (USDT)</th>
         <th>Source</th>
         <th>Position Size</th>
+        <th>Position Value (USDT)</th>
         <th>Unrealized PnL</th>
         <th>Funding Count</th>
         <th>Total Funding (USDT)</th>
@@ -64,7 +56,15 @@
   </table>
 
   <script>
+    let secondsElapsed = 0;
+    const liveTimerEl = document.getElementById('liveTimer');
     const startTime = performance.now();
+
+    // Live counter every second
+    const timerInterval = setInterval(() => {
+      secondsElapsed++;
+      liveTimerEl.textContent = secondsElapsed;
+    }, 1000);
 
     function parseSGDateString(dateStr) {
       const [d, m, yAndRest] = dateStr.split('/');
@@ -91,36 +91,40 @@
     fetch('/api/funding')
       .then(res => res.json())
       .then(data => {
+        clearInterval(timerInterval);
         const endTime = performance.now();
         const loadSeconds = ((endTime - startTime) / 1000).toFixed(2);
-        document.getElementById('loadTime').textContent = `⏱ Loaded in ${loadSeconds} seconds`;
+        document.getElementById('loadTime').textContent = `✅ Loaded in ${loadSeconds} seconds`;
 
-        // === Equity Overview ===
+        // --- Equity Overview ---
         if (data.equityOverview) {
-          const tbody = document.querySelector('#equityTable tbody');
-          let totalAll = 0;
-          for (const [exchange, eq] of Object.entries(data.equityOverview)) {
-            const row = document.createElement('tr');
-            row.innerHTML = `
-              <td class="center">${exchange}</td>
-              <td class="right">${parseFloat(eq.futures).toFixed(2)}</td>
-              <td class="right">${parseFloat(eq.funding).toFixed(2)}</td>
-              <td class="right">${parseFloat(eq.total).toFixed(2)}</td>
-            `;
-            tbody.appendChild(row);
-            totalAll += eq.total || 0;
-          }
-          document.getElementById('grandTotal').textContent = totalAll.toFixed(2);
+          const div = document.getElementById('equitySummary');
+          const total = data.totalEquity?.toFixed(2) || '0.00';
+
+          const eq = data.equityOverview;
+          div.innerHTML = `
+            <h3>💰 Exchange Equity Summary</h3>
+            <table>
+              <tr><th>Exchange</th><th>Futures</th><th>Funding</th><th>Total Equity (USDT)</th></tr>
+              <tr><td>Binance</td><td>${eq.binance?.futures?.toFixed(2) || 0}</td><td>${eq.binance?.funding?.toFixed(2) || 0}</td><td>${eq.binance?.total?.toFixed(2) || 0}</td></tr>
+              <tr><td>Bybit</td><td>${eq.bybit?.futures?.toFixed(2) || 0}</td><td>${eq.bybit?.funding?.toFixed(2) || 0}</td><td>${eq.bybit?.total?.toFixed(2) || 0}</td></tr>
+              <tr><td>Phemex</td><td>${eq.phemex?.futures?.toFixed(2) || 0}</td><td>${eq.phemex?.funding?.toFixed(2) || 0}</td><td>${eq.phemex?.total?.toFixed(2) || 0}</td></tr>
+              <tr><td>MEXC</td><td>${eq.mexc?.futures?.toFixed(2) || 0}</td><td>${eq.mexc?.funding?.toFixed(2) || 0}</td><td>${eq.mexc?.total?.toFixed(2) || 0}</td></tr>
+              <tr><th colspan="3" style="text-align:right;">TOTAL:</th><th>${total}</th></tr>
+            </table>
+          `;
         }
 
-        // === Funding Details ===
+        // --- Funding Data Table ---
         if (data.success && Array.isArray(data.result)) {
           const tbody = document.querySelector('#fundingTable tbody');
           const grouped = {};
+
           data.result.forEach(item => {
             if (!grouped[item.symbol]) grouped[item.symbol] = [];
             grouped[item.symbol].push(item);
           });
+
           const sortedSymbols = Object.keys(grouped).sort();
 
           for (const symbol of sortedSymbols) {
@@ -146,6 +150,7 @@
               row.innerHTML += `
                 <td class="center">${entry.source}</td>
                 <td class="center">${entry.positionSize}</td>
+                <td class="right">${parseFloat(entry.positionValue).toFixed(2)}</td>
                 <td class="right">${parseFloat(entry.unrealizedPnl).toFixed(2)}</td>
                 <td class="center">${entry.count}</td>
                 <td class="right">${parseFloat(entry.totalFunding).toFixed(2)}</td>
@@ -153,7 +158,6 @@
                 <td class="center">${entry.startTime}</td>
                 <td class="center">${entry.endTime}</td>
               `;
-
               tbody.appendChild(row);
             });
           }
@@ -162,6 +166,7 @@
         }
       })
       .catch(err => {
+        clearInterval(timerInterval);
         console.error(err);
         document.getElementById('loadTime').textContent = '❌ Error loading data.';
       });
