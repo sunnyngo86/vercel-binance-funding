@@ -106,10 +106,10 @@
             <h3>💰 Exchange Equity Summary</h3>
             <table>
               <tr><th>Exchange</th><th>Futures</th><th>Funding</th><th>Total Equity (USDT)</th></tr>
-              <tr><td>Binance</td><td>${eq.binance?.futures?.toFixed(2) || 0}</td><td>${eq.binance?.funding?.toFixed(2) || 0}</td><td>${eq.binance?.total?.toFixed(2) || 0}</td></tr>
-              <tr><td>Bybit</td><td>${eq.bybit?.futures?.toFixed(2) || 0}</td><td>${eq.bybit?.funding?.toFixed(2) || 0}</td><td>${eq.bybit?.total?.toFixed(2) || 0}</td></tr>
-              <tr><td>Phemex</td><td>${eq.phemex?.futures?.toFixed(2) || 0}</td><td>${eq.phemex?.funding?.toFixed(2) || 0}</td><td>${eq.phemex?.total?.toFixed(2) || 0}</td></tr>
-              <tr><td>MEXC</td><td>${eq.mexc?.futures?.toFixed(2) || 0}</td><td>${eq.mexc?.funding?.toFixed(2) || 0}</td><td>${eq.mexc?.total?.toFixed(2) || 0}</td></tr>
+              <tr><td>Binance</td><td class="right">${eq.binance?.futures?.toFixed(2) || 0}</td><td class="right">${eq.binance?.funding?.toFixed(2) || 0}</td><td class="right">${eq.binance?.total?.toFixed(2) || 0}</td></tr>
+              <tr><td>Bybit</td><td class="right">${eq.bybit?.futures?.toFixed(2) || 0}</td><td class="right">${eq.bybit?.funding?.toFixed(2) || 0}</td><td class="right">${eq.bybit?.total?.toFixed(2) || 0}</td></tr>
+              <tr><td>Phemex</td><td class="right">${eq.phemex?.futures?.toFixed(2) || 0}</td><td class="right">${eq.phemex?.funding?.toFixed(2) || 0}</td><td class="right">${eq.phemex?.total?.toFixed(2) || 0}</td></tr>
+              <tr><td>MEXC</td><td class="right">${eq.mexc?.futures?.toFixed(2) || 0}</td><td class="right">${eq.mexc?.funding?.toFixed(2) || 0}</td><td class="right">${eq.mexc?.total?.toFixed(2) || 0}</td></tr>
               <tr><th colspan="3" style="text-align:right;">TOTAL:</th><th>${total}</th></tr>
             </table>
           `;
