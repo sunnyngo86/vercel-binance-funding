@@ -281,13 +281,21 @@ module.exports = async (req, res) => {
       }
 
       const total = allFunding.reduce((sum, f) => sum + parseFloat(f.amount), 0);
-      const { unrealizedPnl, positionValue, currentPrice } = await getPnLAndValue(mexc, pos);
-
+      // --- Adjust position size for contract multiplier ---
+      const market = mexc.markets[pos.symbol];
+      const contractSize = market?.contractSize || 1;
+      const realAmount = (pos.contracts || 0) * contractSize;
+      
+      // Fetch PnL & value using actual token size
+      const ticker = await mexc.fetchTicker(pos.symbol);
+      const currentPrice = ticker.last || 0;
+      const unrealizedPnl = (currentPrice - (pos.entryPrice || 0)) * realAmount;
+      const positionValue = realAmount * currentPrice;
+      
       result.push({
         source: 'mexc',
         symbol: cleanSymbol,
-        currentPrice,
-        positionSize: pos.contracts,
+        positionSize: realAmount,  // ✅ use real token amount
         positionValue,
         unrealizedPnl,
         count: allFunding.length,
