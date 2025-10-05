@@ -17,7 +17,7 @@ module.exports = async (req, res) => {
     return new Date(ts).toLocaleString('en-SG', { timeZone: 'Asia/Singapore' });
   }
 
-  // return unrealized PnL, positionValue, and currentPrice
+  // helper: return current price, unrealized PnL, and position value
   async function getPnLAndValue(exchange, pos) {
     try {
       const ticker = await exchange.fetchTicker(pos.symbol);
@@ -88,8 +88,8 @@ module.exports = async (req, res) => {
       result.push({
         source: 'binance',
         symbol: cleanSymbol,
-        positionSize: pos.contracts,
         currentPrice,
+        positionSize: pos.contracts,
         positionValue,
         unrealizedPnl,
         count: allFunding.length,
@@ -151,8 +151,8 @@ module.exports = async (req, res) => {
       result.push({
         source: 'phemex',
         symbol: cleanSymbol,
-        positionSize: pos.contracts,
         currentPrice,
+        positionSize: pos.contracts,
         positionValue,
         unrealizedPnl,
         count: allFunding.length,
@@ -210,16 +210,111 @@ module.exports = async (req, res) => {
         await new Promise(r => setTimeout(r, 500));
       }
 
-      const total = allFunding.reduce((sum, f) =>
-        sum + parseFloat(f.info?.execFee || f.amount || 0) * -1, 0);
+      const total = allFunding.reduce(
+        (sum, f) => sum + parseFloat(f.info?.execFee || f.amount || 0) * -1,
+        0
+      );
       const { unrealizedPnl, positionValue, currentPrice } = await getPnLAndValue(bybit, pos);
 
       result.push({
         source: 'bybit',
         symbol: cleanSymbol,
-        positionSize: pos.contracts,
         currentPrice,
+        positionSize: pos.contracts,
         positionValue,
         unrealizedPnl,
         count: allFunding.length,
-        totalFunding: t
+        totalFunding: total,
+        startTime: toSGTime(oneDayAgo),
+        endTime: toSGTime(now),
+      });
+    }
+
+    const bybitFutures = await bybit.fetchBalance({ type: 'swap' });
+    const bybitFunding = await bybit.fetchBalance({ type: 'funding' });
+    const bybitFuturesEquity = parseFloat(bybitFutures.info.result.list?.[0]?.totalEquity || 0);
+    const bybitFundingEquity = parseFloat(
+      bybitFunding.info.result.balance?.find(b => b.coin === 'USD')?.walletBalance || 0
+    );
+    equityOverview.bybit = {
+      futures: bybitFuturesEquity,
+      funding: bybitFundingEquity,
+      total: bybitFuturesEquity + bybitFundingEquity,
+    };
+
+    // === MEXC ===
+    const mexc = new ccxt.mexc({
+      apiKey: MEXC_API_KEY,
+      secret: MEXC_API_SECRET,
+      enableRateLimit: true,
+      options: { defaultType: 'swap' },
+    });
+
+    await mexc.loadMarkets();
+    const openMexc = (await mexc.fetch_positions()).filter(p => p.contracts && p.contracts > 0);
+
+    for (const pos of openMexc) {
+      const symbol = pos.symbol;
+      const cleanSymbol = symbol.replace('/USDT:USDT', '');
+      let page = 1;
+      let seen = new Set();
+      let allFunding = [];
+
+      while (true) {
+        const data = await mexc.fetchFundingHistory(symbol, undefined, 100, {
+          page_num: page,
+          page_size: 100,
+        });
+        if (!data?.length) break;
+        for (const f of data) {
+          if (f.timestamp >= oneDayAgo && f.timestamp <= now) {
+            const key = `${f.timestamp}-${f.amount}`;
+            if (!seen.has(key)) {
+              seen.add(key);
+              allFunding.push(f);
+            }
+          }
+        }
+        if (data.length < 100) break;
+        page++;
+        await new Promise(r => setTimeout(r, mexc.rateLimit));
+      }
+
+      const total = allFunding.reduce((sum, f) => sum + parseFloat(f.amount), 0);
+      const { unrealizedPnl, positionValue, currentPrice } = await getPnLAndValue(mexc, pos);
+
+      result.push({
+        source: 'mexc',
+        symbol: cleanSymbol,
+        currentPrice,
+        positionSize: pos.contracts,
+        positionValue,
+        unrealizedPnl,
+        count: allFunding.length,
+        totalFunding: total,
+        startTime: toSGTime(oneDayAgo),
+        endTime: toSGTime(now),
+      });
+    }
+
+    const mexcBalance = await mexc.fetchBalance();
+    const mexcUSDT = mexcBalance.info.data.find(c => c.currency === 'USDT');
+    const mexcEquity = parseFloat(mexcUSDT?.equity || 0);
+    equityOverview.mexc = {
+      futures: mexcEquity,
+      funding: 0,
+      total: mexcEquity,
+    };
+
+    // === TOTAL EQUITY ===
+    const totalEquity = Object.values(equityOverview).reduce(
+      (sum, ex) => sum + (ex.total || 0),
+      0
+    );
+
+    res.status(200).json({ success: true, result, equityOverview, totalEquity });
+  } catch (e) {
+    console.error('❌ Funding API error:', e);
+    res.status(500).json({ error: e.message });
+  }
+};
