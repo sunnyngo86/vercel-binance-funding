@@ -10,19 +10,29 @@
     th, td { padding: 8px 12px; border: 1px solid #ccc; }
     th { background: #333; color: white; }
     tr:nth-child(even) { background: #f2f2f2; }
+
     td.center { text-align: center; }
     td.right { text-align: right; }
     td.symbol-cell { font-weight: bold; background: #eee; text-align: center; }
     td.total-cell { font-weight: bold; text-align: right; }
     td.total-cell.positive { color: green; }
     td.total-cell.negative { color: red; }
+
+    .long { color: green; font-weight: bold; }
+    .short { color: red; font-weight: bold; }
+
     #loadTime { font-weight: bold; font-size: 1rem; margin-bottom: 1em; }
+
+    .equity-up { color: green; font-weight: bold; }
+    .equity-down { color: red; font-weight: bold; }
+    .equity-same { color: gray; font-weight: bold; }
   </style>
 </head>
 <body>
   <h2>Funding Fee Overview</h2>
   <p id="loadTime">⏱ Loading... 0s</p>
 
+  <!-- === EQUITY SUMMARY TABLE === -->
   <table id="equityTable">
     <thead>
       <tr>
@@ -46,6 +56,7 @@
     </tfoot>
   </table>
 
+  <!-- === FUNDING DETAILS TABLE === -->
   <table id="fundingTable">
     <thead>
       <tr>
@@ -65,6 +76,16 @@
       </tr>
     </thead>
     <tbody></tbody>
+    <tfoot>
+      <tr>
+        <td colspan="6" class="right"><b>Totals:</b></td>
+        <td id="sumPositionValue" class="right"></td>
+        <td id="sumUnrealizedPnl" class="right"></td>
+        <td colspan="1"></td>
+        <td id="sumTotalFunding" class="right"></td>
+        <td colspan="3"></td>
+      </tr>
+    </tfoot>
   </table>
 
   <script>
@@ -108,6 +129,10 @@
         }
 
         const tbody = document.querySelector('#fundingTable tbody');
+        let totalFundingSum = 0;
+        let totalPositionValueSum = 0;
+        let totalUnrealizedPnlSum = 0;
+
         const grouped = {};
         data.result.forEach(item => {
           if (!grouped[item.symbol]) grouped[item.symbol] = [];
@@ -121,9 +146,19 @@
           const entries = grouped[symbol];
           const symbolTotal = entries.reduce((sum, e) => sum + parseFloat(e.totalFunding), 0);
 
-          entries.forEach((entry, idx) => {
-            const row = document.createElement('tr');
+          // Sort short on top, long below
+          entries.sort((a, b) => {
+            if (a.side === 'short' && b.side === 'long') return -1;
+            if (a.side === 'long' && b.side === 'short') return 1;
+            return 0;
+          });
 
+          entries.forEach((entry, idx) => {
+            totalFundingSum += parseFloat(entry.totalFunding || 0);
+            totalPositionValueSum += parseFloat(entry.positionValue || 0);
+            totalUnrealizedPnlSum += parseFloat(entry.unrealizedPnl || 0);
+
+            const row = document.createElement('tr');
             if (idx === 0) {
               const tdSymbol = document.createElement('td');
               tdSymbol.rowSpan = entries.length;
@@ -138,10 +173,12 @@
               row.appendChild(tdTotal);
             }
 
+            const sideClass = entry.side === 'long' ? 'long' : entry.side === 'short' ? 'short' : '';
+
             row.innerHTML += `
               <td class="center">${entry.source}</td>
               <td class="right">${parseFloat(entry.currentPrice).toFixed(4)}</td>
-              <td class="center">${entry.side || '-'}</td>
+              <td class="center ${sideClass}">${entry.side || '-'}</td>
               <td class="center">${entry.positionSize}</td>
               <td class="right">${parseFloat(entry.positionValue).toFixed(2)}</td>
               <td class="right">${parseFloat(entry.unrealizedPnl).toFixed(2)}</td>
@@ -155,9 +192,14 @@
           });
         }
 
-        // Render Equity Summary Table
+        // === FUNDING TOTALS ===
+        document.getElementById('sumPositionValue').textContent = totalPositionValueSum.toFixed(2);
+        document.getElementById('sumUnrealizedPnl').textContent = totalUnrealizedPnlSum.toFixed(2);
+        document.getElementById('sumTotalFunding').textContent = totalFundingSum.toFixed(2);
+
+        // === EQUITY TABLE ===
         const eqBody = document.querySelector('#equityTable tbody');
-        let totalEquityAll = 0, totalLongAll = 0, totalShortAll = 0;
+        let totalAllEquity = 0, totalLongAll = 0, totalShortAll = 0;
 
         for (const [exchange, eq] of Object.entries(data.equityOverview)) {
           const longSum = data.result
@@ -167,7 +209,7 @@
             .filter(r => r.source === exchange && r.side === 'short')
             .reduce((sum, r) => sum + (r.positionValue || 0), 0);
 
-          totalEquityAll += eq.total || 0;
+          totalAllEquity += eq.total || 0;
           totalLongAll += longSum;
           totalShortAll += shortSum;
 
@@ -183,7 +225,24 @@
           eqBody.appendChild(row);
         }
 
-        document.getElementById('totalEquityAll').textContent = totalEquityAll.toFixed(2);
+        // === TOTAL EQUITY COMPARISON ===
+        const totalCell = document.getElementById('totalEquityAll');
+        const lastTotal = parseFloat(localStorage.getItem('lastTotalEquity') || 0);
+        localStorage.setItem('lastTotalEquity', totalAllEquity);
+        totalCell.textContent = totalAllEquity.toFixed(2);
+
+        if (lastTotal === 0) {
+          totalCell.className = 'right equity-same';
+        } else if (totalAllEquity > lastTotal) {
+          totalCell.className = 'right equity-up';
+          totalCell.textContent += ' 🔼';
+        } else if (totalAllEquity < lastTotal) {
+          totalCell.className = 'right equity-down';
+          totalCell.textContent += ' 🔻';
+        } else {
+          totalCell.className = 'right equity-same';
+        }
+
         document.getElementById('totalLongPositionAll').textContent = totalLongAll.toFixed(2);
         document.getElementById('totalShortPositionAll').textContent = totalShortAll.toFixed(2);
       })
