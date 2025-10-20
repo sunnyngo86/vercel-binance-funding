@@ -17,7 +17,7 @@ module.exports = async (req, res) => {
     return new Date(ts).toLocaleString('en-SG', { timeZone: 'Asia/Singapore' });
   }
 
-  // helper: return current price, unrealized PnL, and position value
+  // helper: return current price, unrealized PnL, position value, and side
   async function getPnLAndValue(exchange, pos) {
     try {
       const ticker = await exchange.fetchTicker(pos.symbol);
@@ -32,10 +32,10 @@ module.exports = async (req, res) => {
       }
 
       const positionValue = amount * currentPrice;
-      return { unrealizedPnl: pnl, positionValue, currentPrice };
+      return { unrealizedPnl: pnl, positionValue, currentPrice, side };
     } catch (err) {
       console.error(`❌ Failed to fetch ticker for ${pos.symbol}:`, err.message);
-      return { unrealizedPnl: 0, positionValue: 0, currentPrice: 0 };
+      return { unrealizedPnl: 0, positionValue: 0, currentPrice: 0, side: 'unknown' };
     }
   }
 
@@ -83,11 +83,12 @@ module.exports = async (req, res) => {
       }
 
       const total = allFunding.reduce((sum, f) => sum + parseFloat(f.amount), 0);
-      const { unrealizedPnl, positionValue, currentPrice } = await getPnLAndValue(binance, pos);
+      const { unrealizedPnl, positionValue, currentPrice, side } = await getPnLAndValue(binance, pos);
 
       result.push({
         source: 'binance',
         symbol: cleanSymbol,
+        side,
         currentPrice,
         positionSize: pos.contracts,
         positionValue,
@@ -146,11 +147,12 @@ module.exports = async (req, res) => {
       }
 
       const total = allFunding.reduce((sum, f) => sum + parseFloat(f.amount) * -1, 0);
-      const { unrealizedPnl, positionValue, currentPrice } = await getPnLAndValue(phemex, pos);
+      const { unrealizedPnl, positionValue, currentPrice, side } = await getPnLAndValue(phemex, pos);
 
       result.push({
         source: 'phemex',
         symbol: cleanSymbol,
+        side,
         currentPrice,
         positionSize: pos.contracts,
         positionValue,
@@ -214,11 +216,12 @@ module.exports = async (req, res) => {
         (sum, f) => sum + parseFloat(f.info?.execFee || f.amount || 0) * -1,
         0
       );
-      const { unrealizedPnl, positionValue, currentPrice } = await getPnLAndValue(bybit, pos);
+      const { unrealizedPnl, positionValue, currentPrice, side } = await getPnLAndValue(bybit, pos);
 
       result.push({
         source: 'bybit',
         symbol: cleanSymbol,
+        side,
         currentPrice,
         positionSize: pos.contracts,
         positionValue,
@@ -281,28 +284,25 @@ module.exports = async (req, res) => {
       }
 
       const total = allFunding.reduce((sum, f) => sum + parseFloat(f.amount), 0);
-      // --- Adjust position size for contract multiplier ---
       const market = mexc.markets[pos.symbol];
       const contractSize = market?.contractSize || 1;
       const realAmount = (pos.contracts || 0) * contractSize;
-      
-      // Fetch PnL & value using actual token size
+
       const ticker = await mexc.fetchTicker(pos.symbol);
       const currentPrice = ticker.last || 0;
-      //const unrealizedPnl = (currentPrice - (pos.entryPrice || 0)) * realAmount;
-      const positionValue = realAmount * currentPrice;
-      
       const side = pos.side || (pos.contracts > 0 ? 'long' : 'short');
       let unrealizedPnl = (currentPrice - (pos.entryPrice || 0)) * realAmount;
       if (side.toLowerCase().includes('short')) {
         unrealizedPnl = ((pos.entryPrice || 0) - currentPrice) * realAmount;
       }
-      
+      const positionValue = realAmount * currentPrice;
+
       result.push({
         source: 'mexc',
         symbol: cleanSymbol,
+        side,
         currentPrice,
-        positionSize: realAmount,  // ✅ use real token amount
+        positionSize: realAmount,
         positionValue,
         unrealizedPnl,
         count: allFunding.length,
