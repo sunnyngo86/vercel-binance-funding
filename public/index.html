@@ -1,582 +1,762 @@
-const ccxt = require('ccxt');
-
-const FUNDING_WINDOW_MS = 72.01 * 60 * 60 * 1000;
-const FUNDING_PAGE_LIMIT = 100;
-const FUNDING_MAX_PAGES = 3;
-const NEGATIVE_FUNDING_SIGN = new Set(['phemex', 'bybit']);
-const COINS = ['USDT', 'USDC'];
-
-const toSGTime = (ts) =>
-  new Date(ts).toLocaleString('en-SG', { timeZone: 'Asia/Singapore' });
-
-const cleanSymbol = (s) => {
-  if (!s) return s;
-  let out = s;
-  if (out.includes('/')) out = out.split('/')[0];
-  if (out.includes(':')) out = out.split(':')[0];
-  return out;
-};
-
-const convertMexcOrderSide = (code) => {
-  if (code === '1' || code === 1 || code === '3' || code === 3) return 'buy';
-  if (code === '2' || code === 2 || code === '4' || code === 4) return 'sell';
-  return code;
-};
-
-const num = (v) => parseFloat(v || 0) || 0;
-
-const emptyWallet = () => ({
-  futures: { USDT: 0, USDC: 0 },
-  spot: { USDT: 0, USDC: 0 },
-  funding: { USDT: 0, USDC: 0 },
-  total: 0,
-});
-
-const sumWallet = (w) => {
-  let t = 0;
-  for (const bucket of ['futures', 'spot', 'funding']) {
-    for (const coin of COINS) t += w[bucket][coin] || 0;
-  }
-  return t;
-};
-
-function buildExchanges() {
-  return {
-    binance: new ccxt.binance({
-      apiKey: process.env.BINANCE_API_KEY,
-      secret: process.env.BINANCE_API_SECRET,
-      enableRateLimit: true,
-      options: { defaultType: 'future', warnOnFetchOpenOrdersWithoutSymbol: false },
-    }),
-    phemex: new ccxt.phemex({
-      apiKey: process.env.PHEMEX_API_KEY,
-      secret: process.env.PHEMEX_API_SECRET,
-      enableRateLimit: true,
-      options: { defaultType: 'swap' },
-    }),
-    bybit: new ccxt.bybit({
-      apiKey: process.env.BYBIT_API_KEY,
-      secret: process.env.BYBIT_API_SECRET,
-      enableRateLimit: true,
-      options: { defaultType: 'swap' },
-    }),
-    mexc: new ccxt.mexc({
-      apiKey: process.env.MEXC_API_KEY,
-      secret: process.env.MEXC_API_SECRET,
-      enableRateLimit: true,
-      options: { defaultType: 'swap' },
-    }),
-  };
-}
-
-// ---------- 余额 ----------
-async function fetchBinanceEquity(ex) {
-  const w = emptyWallet();
-  const [umBal, spotBal, fundingBal] = await Promise.all([
-    ex.fetchBalance({ type: 'future' }).catch(() => ({})),
-    ex.fetchBalance({ type: 'spot' }).catch(() => ({})),
-    ex.fetchBalance({ type: 'funding' }).catch(() => ({})),
-  ]);
-
-  const umAssets = umBal?.info?.assets || [];
-  for (const a of umAssets) {
-    if (a.asset === 'USDT') w.futures.USDT = num(a.marginBalance);
-    if (a.asset === 'USDC') w.futures.USDC = num(a.marginBalance);
-  }
-  if (!w.futures.USDT && !w.futures.USDC) {
-    w.futures.USDT = num(umBal?.info?.totalMarginBalance);
-  }
-
-  w.spot.USDT = num(spotBal?.total?.USDT);
-  w.spot.USDC = num(spotBal?.total?.USDC);
-  w.funding.USDT = num(fundingBal?.total?.USDT || fundingBal?.free?.USDT);
-  w.funding.USDC = num(fundingBal?.total?.USDC || fundingBal?.free?.USDC);
-
-  w.total = sumWallet(w);
-  return w;
-}
-
-async function fetchPhemexEquity(ex) {
-  const w = emptyWallet();
-  const [usdtSwap, usdcSwap, spot] = await Promise.all([
-    ex.fetchBalance({ type: 'swap', code: 'USDT' }).catch(() => ({})),
-    ex.fetchBalance({ type: 'swap', code: 'USDC' }).catch(() => ({})),
-    ex.fetchBalance({ type: 'spot' }).catch(() => ({})),
-  ]);
-
-  const parsePhemex = (bal, fallbackCoin) => {
-    let v = num(bal?.info?.data?.account?.accountBalanceRv);
-    if (!v) {
-      const ev = bal?.info?.data?.account?.accountBalanceEv;
-      if (ev) v = num(ev) / 1e8;
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Funding Fee Overview</title>
+  <style>
+    :root {
+      --bg: #f9f9f9;
+      --surface: #ffffff;
+      --surface-alt: #f2f2f2;
+      --border: #d0d7de;
+      --border-strong: #ccc;
+      --text: #1f2328;
+      --text-dim: #656d76;
+      --text-faint: #8c959f;
+      --header-bg: #333;
+      --header-text: #ffffff;
+      --green: #1a7f37;
+      --green-bg: #dafbe1;
+      --red: #cf222e;
+      --red-bg: #ffebe9;
+      --yellow: #9a6700;
+      --yellow-bg: #fff8c5;
+      --blue: #0969da;
+      --blue-bg: #ddf4ff;
+      --purple: #8250df;
+      --orange: #bc4c00;
+      --shadow: 0 1px 3px rgba(0,0,0,0.08);
     }
-    if (!v) v = num(bal?.total?.[fallbackCoin]);
-    return v;
-  };
-
-  w.futures.USDT = parsePhemex(usdtSwap, 'USDT');
-  w.futures.USDC = parsePhemex(usdcSwap, 'USDC');
-  w.spot.USDT = num(spot?.total?.USDT);
-  w.spot.USDC = num(spot?.total?.USDC);
-
-  w.total = sumWallet(w);
-  return w;
-}
-
-async function fetchBybitEquity(ex) {
-  const w = emptyWallet();
-  const [unified, fund] = await Promise.all([
-    ex.fetchBalance({ type: 'unified' }).catch(() =>
-      ex.fetchBalance({ type: 'swap' }).catch(() => ({}))
-    ),
-    ex.fetchBalance({ type: 'funding' }).catch(() => ({})),
-  ]);
-
-  const coinList = unified?.info?.result?.list?.[0]?.coin || [];
-  for (const c of coinList) {
-    if (c.coin === 'USDT') w.futures.USDT = num(c.equity || c.walletBalance);
-    if (c.coin === 'USDC') w.futures.USDC = num(c.equity || c.walletBalance);
-  }
-  if (!w.futures.USDT && !w.futures.USDC) {
-    w.futures.USDT = num(unified?.info?.result?.list?.[0]?.totalEquity);
-  }
-
-  const fundList = fund?.info?.result?.balance || [];
-  for (const b of fundList) {
-    if (b.coin === 'USDT') w.funding.USDT = num(b.walletBalance);
-    if (b.coin === 'USDC') w.funding.USDC = num(b.walletBalance);
-  }
-
-  w.total = sumWallet(w);
-  return w;
-}
-
-async function fetchMexcEquity(ex) {
-  const w = emptyWallet();
-  const [swapBal, spotBal] = await Promise.all([
-    ex.fetchBalance({ type: 'swap' }).catch(() => ({})),
-    ex.fetchBalance({ type: 'spot' }).catch(() => ({})),
-  ]);
-
-  const dataArr = swapBal?.info?.data;
-  if (Array.isArray(dataArr)) {
-    for (const c of dataArr) {
-      if (c.currency === 'USDT') w.futures.USDT = num(c.equity);
-      if (c.currency === 'USDC') w.futures.USDC = num(c.equity);
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0; padding: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Helvetica, Arial, sans-serif;
+      font-size: 13px;
+      -webkit-font-smoothing: antialiased;
     }
-  } else if (dataArr && typeof dataArr === 'object') {
-    w.futures.USDT = num(dataArr.equity || dataArr.availableBalance);
-  }
-  if (!w.futures.USDT && !w.futures.USDC) {
-    w.futures.USDT = num(swapBal?.total?.USDT);
-    w.futures.USDC = num(swapBal?.total?.USDC);
-  }
+    .container { max-width: 1700px; margin: 0 auto; padding: 2rem; }
+    h1 { font-size: 22px; margin: 0 0 6px; font-weight: 600; }
+    h2 { font-size: 14px; margin: 0; font-weight: 600; }
+    .meta { color: var(--text-dim); font-size: 12px; margin-bottom: 1.25rem; display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+    .pill { background: var(--surface); border: 1px solid var(--border); padding: 3px 10px; border-radius: 999px; font-size: 11px; color: var(--text-dim); }
 
-  w.spot.USDT = num(spotBal?.total?.USDT);
-  w.spot.USDC = num(spotBal?.total?.USDC);
+    /* Stat Cards */
+    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; margin-bottom: 1.5rem; }
+    .stat-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; box-shadow: var(--shadow); }
+    .stat-label { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; font-weight: 600; }
+    .stat-value { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.1; }
+    .stat-sub { font-size: 11px; color: var(--text-faint); margin-top: 4px; font-variant-numeric: tabular-nums; }
 
-  w.total = sumWallet(w);
-  return w;
-}
+    /* Panels */
+    .panel { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; margin-bottom: 1.5rem; overflow: hidden; box-shadow: var(--shadow); }
+    .panel-header { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--border); cursor: pointer; user-select: none; background: var(--surface-alt); }
+    .panel-header:hover { background: #eaeef2; }
+    .chevron { color: var(--text-dim); transition: transform 0.2s; font-size: 10px; }
+    .panel.collapsed .panel-body { display: none; }
+    .panel.collapsed .chevron { transform: rotate(-90deg); }
 
-const BALANCE_FETCHERS = {
-  binance: fetchBinanceEquity,
-  phemex: fetchPhemexEquity,
-  bybit: fetchBybitEquity,
-  mexc: fetchMexcEquity,
-};
+    /* Mobile-friendly table scroll */
+    .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    .table-scroll::-webkit-scrollbar { height: 10px; }
+    .table-scroll::-webkit-scrollbar-thumb { background: #c5ccd3; border-radius: 5px; }
+    .table-scroll::-webkit-scrollbar-track { background: var(--surface-alt); }
 
-// ---------- Ticker ----------
-async function buildTickerCache(exchange, symbols) {
-  if (!symbols.length) return {};
-  try {
-    const tickers = await exchange.fetchTickers(symbols);
-    return tickers || {};
-  } catch {
-    const entries = await Promise.all(
-      symbols.map(async (s) => {
-        try { return [s, await exchange.fetchTicker(s)]; }
-        catch { return [s, null]; }
-      })
-    );
-    return Object.fromEntries(entries.filter(([, t]) => t));
-  }
-}
+    /* Tables */
+    table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+    th, td { padding: 8px 12px; border: 1px solid var(--border-strong); vertical-align: top; }
+    th { background: var(--header-bg); color: var(--header-text); font-weight: 500; font-size: 12px; text-align: left; white-space: nowrap; }
+    tr:nth-child(even) td { background: var(--surface-alt); }
+    td.num, th.num { text-align: right; white-space: nowrap; }
+    td.center, th.center { text-align: center; }
 
-function computePnL(pos, ticker, positionSize) {
-  const currentPrice = ticker?.last || 0;
-  const avgPrice = pos.entryPrice || pos.entry_price || 0;
-  const amount = Math.abs(positionSize || pos.contracts || pos.positionAmt || 0);
-  const side = pos.side || (pos.contracts > 0 ? 'long' : 'short');
+    /* Positions & Funding: larger body font except Orders column */
+    #fundingPanel thead th {
+      font-size: 13px;
+      padding: 9px 12px;
+      text-align: center;  /* 所有 header 居中 */
+    }
+    #fundingBody td { font-size: 14px; }
+    #fundingBody td.orders-cell { font-size: 11px; }
 
-  let pnl = (currentPrice - avgPrice) * amount;
-  if (String(side).toLowerCase().includes('short')) {
-    pnl = (avgPrice - currentPrice) * amount;
-  }
-  return { unrealizedPnl: pnl, positionValue: currentPrice * amount, currentPrice, side };
-}
+    td.symbol-cell { font-weight: bold; background: #eee !important; text-align: center; vertical-align: middle; white-space: nowrap; font-size: 14px; }
+    td.total-cell { font-weight: bold; text-align: right; vertical-align: middle; white-space: nowrap; font-size: 14px; }
+    td.total-cell.positive { color: var(--green); }
+    td.total-cell.negative { color: var(--red); }
 
-// ---------- Funding ----------
-async function fetchFundingWindow(exchange, symbol, sinceMs, nowMs) {
-  const seen = new Set();
-  const all = [];
-  let start = sinceMs;
+    /* Equity breakdown hint (small grey text under merged USD column) */
+    .breakdown {
+      font-size: 10px;
+      font-weight: 400;
+      color: var(--text-faint);
+      margin-top: 2px;
+      white-space: nowrap;
+    }
 
-  for (let i = 0; i < FUNDING_MAX_PAGES; i++) {
-    let page;
-    try { page = await exchange.fetchFundingHistory(symbol, start, FUNDING_PAGE_LIMIT); }
-    catch { break; }
-    if (!page?.length) break;
+    .long { color: var(--green); font-weight: bold; }
+    .short { color: var(--red); font-weight: bold; }
+    .pos { color: var(--green); }
+    .neg { color: var(--red); }
+    .dim { color: var(--text-dim); }
+    .faint { color: var(--text-faint); }
 
-    for (const f of page) {
-      if (f.timestamp >= sinceMs && f.timestamp <= nowMs) {
-        const key = `${f.timestamp}-${f.amount}`;
-        if (!seen.has(key)) { seen.add(key); all.push(f); }
+    /* Orders - 4 columns: side | kind | price | ×amount  (all right-aligned) */
+    .orders {
+      display: grid;
+      grid-template-columns: auto auto 1fr auto;
+      gap: 3px 10px;
+      font-size: 11px;
+      align-items: center;
+      min-width: 200px;
+    }
+    .orders .o-cell { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+    .orders .o-side { font-weight: 600; }
+    .orders .o-side.buy { color: var(--green); }
+    .orders .o-side.sell { color: var(--red); }
+    .orders .o-kind {
+      font-weight: 600;
+      font-size: 10px;
+      padding: 1px 5px;
+      border-radius: 3px;
+      justify-self: end;
+      white-space: nowrap;
+    }
+    .orders .o-kind.LIMIT { background: var(--blue-bg); color: var(--blue); }
+    .orders .o-kind.TP { background: var(--green-bg); color: var(--green); }
+    .orders .o-kind.SL { background: var(--red-bg); color: var(--red); }
+    .orders .o-kind.TRIGGER { background: var(--yellow-bg); color: var(--yellow); }
+    .orders .o-amount { color: var(--text-dim); }
+
+    /* Funding records */
+    .funding-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 2px 10px; font-size: 12px; white-space: nowrap; min-width: 140px; }
+    .funding-grid span { text-align: right; }
+    .funding-grid span.pos { color: var(--green); }
+    .funding-grid span.neg { color: var(--red); }
+
+    /* Health Issues */
+    .health-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 0; }
+    .health-section { border-right: 1px solid var(--border); min-height: 100px; }
+    .health-section:last-child { border-right: none; }
+    .health-section-header { padding: 10px 16px; background: var(--surface-alt); font-size: 12px; font-weight: 600; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border); cursor: pointer; user-select: none; }
+    .health-section-header:hover { background: #eaeef2; }
+    .health-section-header .left-group { display: flex; align-items: center; gap: 8px; flex: 1; }
+    .health-section-header .toggle-btn { width: 22px; height: 22px; display: inline-flex; align-items: center; justify-content: center; background: var(--surface); border: 1px solid var(--border); border-radius: 4px; font-size: 14px; font-weight: 600; color: var(--text-dim); line-height: 1; }
+    .health-section-header .count { background: var(--surface); padding: 2px 8px; border-radius: 999px; font-size: 11px; border: 1px solid var(--border); }
+    .health-section-header.red { color: var(--red); }
+    .health-section-header.yellow { color: var(--yellow); }
+    .health-section-header.orange { color: var(--orange); }
+
+    .health-compact { padding: 10px 16px; }
+    .health-compact.hidden { display: none; }
+
+    .sym-grid-5 { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px 10px; }
+    .sym-grid-5 .sym-chip { font-weight: 600; font-size: 12px; text-align: center; padding: 4px 6px; background: var(--red-bg); color: var(--red); border-radius: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+    .sym-grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px 10px; }
+    .sym-grid-3 .sym-chip { font-size: 12px; padding: 5px 8px; background: var(--yellow-bg); color: var(--yellow); border-radius: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: flex; justify-content: space-between; gap: 6px; }
+    .sym-grid-3 .sym-chip b { font-weight: 600; }
+    .sym-grid-3 .sym-chip .amt { font-variant-numeric: tabular-nums; }
+
+    .health-list { padding: 8px 0; }
+    .health-list.hidden { display: none; }
+    .health-item { padding: 10px 16px; border-bottom: 1px solid #eaeef2; font-size: 12px; }
+    .health-item:last-child { border-bottom: none; }
+    .health-item .sym { font-weight: 600; font-size: 13px; display: inline-block; margin-right: 8px; }
+    .health-item .detail { color: var(--text-dim); font-size: 11px; margin-top: 3px; }
+    .health-item .leg-grid { display: grid; grid-template-columns: auto auto 1fr auto; gap: 2px 12px; margin-top: 6px; font-size: 11px; font-variant-numeric: tabular-nums; }
+    .health-item .leg-grid .leg-ex { color: var(--text-dim); }
+    .health-item .leg-grid .leg-side { font-weight: 600; }
+    .health-item .leg-grid .leg-side.long { color: var(--green); }
+    .health-item .leg-grid .leg-side.short { color: var(--red); }
+    .health-item .leg-grid .leg-size { text-align: right; font-weight: 600; }
+    .health-item .leg-grid .leg-orders { color: var(--text-dim); text-align: right; }
+    .health-empty { padding: 24px 16px; text-align: center; color: var(--text-faint); font-size: 12px; }
+
+    /* Misaligned compact: one line per symbol */
+    .misalign-row {
+      padding: 6px 0;
+      border-bottom: 1px solid #eaeef2;
+      font-size: 12px;
+      display: flex;
+      gap: 10px;
+      align-items: baseline;
+      flex-wrap: wrap;
+    }
+    .misalign-row:last-child { border-bottom: none; }
+    .misalign-row .sym {
+      font-weight: 600;
+      font-size: 13px;
+      min-width: 60px;
+      flex-shrink: 0;
+    }
+    .misalign-row .misalign-parts {
+      color: var(--text-dim);
+      font-variant-numeric: tabular-nums;
+    }
+    .misalign-row .misalign-parts span { margin-right: 2px; }
+
+    /* Loading */
+    .loading { display: inline-flex; align-items: center; gap: 6px; color: var(--text-dim); }
+    .spinner { width: 12px; height: 12px; border: 2px solid var(--border); border-top-color: var(--blue); border-radius: 50%; animation: spin 0.8s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .error { color: var(--red); }
+    .ok { color: var(--green); }
+    .up::after { content: " 🔼"; font-size: 10px; }
+    .down::after { content: " 🔻"; font-size: 10px; }
+
+    @media (max-width: 768px) {
+      .container { padding: 1rem; }
+      h1 { font-size: 18px; }
+      .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .stat-value { font-size: 18px; }
+      th, td { padding: 6px 8px; font-size: 11px; }
+      #fundingBody td { font-size: 12px; }
+      #fundingBody td.orders-cell { font-size: 10px; }
+      .health-grid { grid-template-columns: 1fr; }
+      .health-section { border-right: none; border-bottom: 1px solid var(--border); }
+      .health-section:last-child { border-bottom: none; }
+      .sym-grid-5 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      .sym-grid-3 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Funding Fee Overview</h1>
+    <div class="meta">
+      <span id="loadStatus" class="loading">
+        <span class="spinner"></span><span id="loadTime">Loading... 0s</span>
+      </span>
+      <span id="globalDuration" class="pill"></span>
+      <span id="updateTime" class="pill"></span>
+    </div>
+
+    <div class="stats" id="statsGrid"></div>
+
+    <!-- Health panel -->
+    <div class="panel" id="healthPanel" style="display:none;">
+      <div class="panel-header" onclick="togglePanel(this)">
+        <h2>⚠️ Hedge Health</h2>
+        <span class="chevron">▼</span>
+      </div>
+      <div class="panel-body">
+        <div class="health-grid">
+          <div class="health-section">
+            <div class="health-section-header red" onclick="toggleHealthDetail('noP')">
+              <div class="left-group">
+                <span class="toggle-btn" id="btnNoP">+</span>
+                <span>🚫 No TP/SL Protection</span>
+              </div>
+              <span class="count" id="countNoProtection">0</span>
+            </div>
+            <div class="health-compact" id="compactNoP"></div>
+            <div class="health-list hidden" id="listNoProtection"></div>
+          </div>
+          <div class="health-section">
+            <div class="health-section-header yellow" onclick="toggleHealthDetail('fL')">
+              <div class="left-group">
+                <span class="toggle-btn" id="btnFL">+</span>
+                <span>💸 Funding Loss</span>
+              </div>
+              <span class="count" id="countFundingLoss">0</span>
+            </div>
+            <div class="health-compact" id="compactFL"></div>
+            <div class="health-list hidden" id="listFundingLoss"></div>
+          </div>
+          <div class="health-section">
+            <div class="health-section-header orange" onclick="toggleHealthDetail('mA')">
+              <div class="left-group">
+                <span class="toggle-btn" id="btnMA">+</span>
+                <span>⚖️ Size / Order Misaligned</span>
+              </div>
+              <span class="count" id="countMisaligned">0</span>
+            </div>
+            <div class="health-compact" id="compactMA"></div>
+            <div class="health-list hidden" id="listMisaligned"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Equity -->
+    <div class="panel">
+      <div class="panel-header" onclick="togglePanel(this)">
+        <h2>💰 Exchange Equity</h2>
+        <span class="chevron">▼</span>
+      </div>
+      <div class="panel-body">
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>Exchange</th>
+                <th class="num">Futures USD</th>
+                <th class="num">Spot / Funding USD</th>
+                <th class="num">Total</th>
+                <th class="num">Long Pos</th>
+                <th class="num">Short Pos</th>
+              </tr>
+            </thead>
+            <tbody id="equityBody"></tbody>
+            <tfoot id="equityFoot"></tfoot>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Funding -->
+    <div class="panel">
+      <div class="panel-header" onclick="togglePanel(this)">
+        <h2>📋 Positions & Funding</h2>
+        <span class="chevron">▼</span>
+      </div>
+      <div class="panel-body" id="fundingPanel">
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>Symbol</th>
+                <th class="num">Pair</th>
+                <th>Source</th>
+                <th class="num">Price</th>
+                <th class="center">Side</th>
+                <th class="num">Size</th>
+                <th class="num">Position Value</th>
+                <th class="num">uPnL</th>
+                <th class="center">Cnt</th>
+                <th>Funding Records</th>
+                <th class="num">Total Funding</th>
+                <th>Orders</th>
+              </tr>
+            </thead>
+            <tbody id="fundingBody"></tbody>
+            <tfoot>
+              <tr>
+                <td colspan="6" style="text-align:right;"><b>Totals:</b></td>
+                <td id="sumPosValue" class="num"></td>
+                <td id="sumUpnl" class="num"></td>
+                <td></td><td></td>
+                <td id="sumFunding" class="num"></td>
+                <td></td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let seconds = 0;
+    const timer = setInterval(() => {
+      seconds++;
+      document.getElementById('loadTime').textContent = `Loading... ${seconds}s`;
+    }, 1000);
+
+    const fmt = (n, d = 2) => Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
+    const sign = (n) => n > 0 ? 'pos' : n < 0 ? 'neg' : 'dim';
+
+    // 智能 size 小数位
+    function sizeDp(n) {
+      const x = Math.abs(Number(n) || 0);
+      if (x === 0) return 0;
+      if (x < 1) return 4;
+      if (x < 100) return 2;
+      return 0;
+    }
+
+    function parseSGDateString(dateStr) {
+      try {
+        const [d, m, yAndRest] = dateStr.split('/');
+        const [y, timeStr] = yAndRest.split(', ');
+        const [time, modifier] = timeStr.split(' ');
+        let [hh, mm, ss] = time.split(':').map(Number);
+        if (modifier?.toLowerCase() === 'pm' && hh !== 12) hh += 12;
+        if (modifier?.toLowerCase() === 'am' && hh === 12) hh = 0;
+        return new Date(`${y}-${m}-${d}T${String(hh).padStart(2,'0')}:${String(mm).padStart(2,'0')}:${String(ss).padStart(2,'0')}+08:00`);
+      } catch { return new Date(); }
+    }
+    function formatCompact(d) {
+      return d.toLocaleString('en-SG', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', hour12: true })
+        .replace('AM','am').replace('PM','pm');
+    }
+    function togglePanel(headerEl) {
+      headerEl.closest('.panel').classList.toggle('collapsed');
+    }
+    function toggleHealthDetail(key) {
+      const map = {
+        noP: { compact: 'compactNoP', list: 'listNoProtection', btn: 'btnNoP' },
+        fL:  { compact: 'compactFL',  list: 'listFundingLoss',  btn: 'btnFL' },
+        mA:  { compact: 'compactMA',  list: 'listMisaligned',   btn: 'btnMA' },
+      };
+      const ids = map[key];
+      const compactEl = document.getElementById(ids.compact);
+      const listEl = document.getElementById(ids.list);
+      const btnEl = document.getElementById(ids.btn);
+      const expanded = !listEl.classList.contains('hidden');
+      if (expanded) {
+        listEl.classList.add('hidden');
+        compactEl.classList.remove('hidden');
+        btnEl.textContent = '+';
+      } else {
+        listEl.classList.remove('hidden');
+        compactEl.classList.add('hidden');
+        btnEl.textContent = '−';
       }
     }
-    const last = page[page.length - 1]?.timestamp;
-    if (!last || last <= start || page.length < FUNDING_PAGE_LIMIT) break;
-    start = last + 1;
-  }
-  all.sort((a, b) => b.timestamp - a.timestamp);
-  return all;
-}
 
-// ---------- 持仓 ----------
-async function processExchangePositions(name, exchange, nowMs, sinceMs) {
-  let positions;
-  try {
-    positions = (name === 'phemex' || name === 'mexc')
-      ? await exchange.fetch_positions()
-      : await exchange.fetchPositions();
-  } catch (err) {
-    console.error(`❌ ${name} positions:`, err.message);
-    return [];
-  }
+    function renderStats(data, totalLongVal, totalShortVal, durationHours) {
+      const grid = document.getElementById('statsGrid');
+      const lastTotal = parseFloat(localStorage.getItem('lastTotalEquity') || '0');
+      localStorage.setItem('lastTotalEquity', data.totalEquity);
 
-  const open = positions.filter((p) => p.contracts && p.contracts > 0);
-  if (!open.length) return [];
-
-  const symbols = [...new Set(open.map((p) => p.symbol))];
-  const tickerCache = await buildTickerCache(exchange, symbols);
-  const signFlip = NEGATIVE_FUNDING_SIGN.has(name) ? -1 : 1;
-
-  const rows = await Promise.all(open.map(async (pos) => {
-    const allFunding = await fetchFundingWindow(exchange, pos.symbol, sinceMs, nowMs);
-    const totalFunding = allFunding.reduce((s, f) => s + num(f.amount), 0) * signFlip;
-
-    let positionSize = pos.contracts;
-    if (name === 'mexc') {
-      const market = exchange.markets[pos.symbol];
-      const contractSize = market?.contractSize || 1;
-      positionSize = (pos.contracts || 0) * contractSize;
-    }
-
-    const ticker = tickerCache[pos.symbol];
-    const { unrealizedPnl, positionValue, currentPrice, side } = computePnL(pos, ticker, positionSize);
-
-    return {
-      source: name,
-      symbol: cleanSymbol(pos.symbol),
-      rawSymbol: pos.symbol,
-      side,
-      currentPrice,
-      entryPrice: pos.entryPrice || pos.entry_price || 0,
-      positionSize,
-      positionValue,
-      unrealizedPnl,
-      count: allFunding.length,
-      totalFunding,
-      fundingRecords: allFunding.map((f) => num(f.amount) * signFlip),
-      startTime: toSGTime(sinceMs),
-      endTime: toSGTime(nowMs),
-    };
-  }));
-
-  return rows;
-}
-
-// ---------- 订单 ----------
-function formatOrder(o, name, exchange) {
-  const triggerPrice = num(
-    o.triggerPrice || o.stopPrice ||
-    o.info?.stopPrice || o.info?.triggerPrice || 0
-  );
-  const limitPrice = num(o.price);
-  const orderType = String(o.type || o.info?.type || 'LIMIT').toUpperCase();
-
-  let kind = 'LIMIT';
-  if (/TAKE_PROFIT|TAKEPROFIT/.test(orderType)) kind = 'TP';
-  else if (/STOP/.test(orderType)) kind = 'SL';
-  else if (triggerPrice && !limitPrice) kind = 'TRIGGER';
-
-  const displayPrice = (kind === 'LIMIT')
-    ? (limitPrice || triggerPrice)
-    : (triggerPrice || limitPrice);
-
-  // MEXC 合约 amount 是张数 (contracts)；需要 × contractSize 转成币数
-  // 保持和 position.positionSize 的换算一致（见 processExchangePositions）
-  let amount = num(o.amount || o.info?.origQty || o.info?.quantity || 0);
-  if (name === 'mexc' && exchange && o.symbol) {
-    const market = exchange.markets?.[o.symbol];
-    const contractSize = market?.contractSize;
-    if (contractSize && contractSize !== 1) {
-      amount = amount * contractSize;
-    }
-  }
-
-  return {
-    exchange: name,
-    symbol: cleanSymbol(o.symbol),
-    side: name === 'mexc' ? convertMexcOrderSide(o.side) : o.side,
-    price: displayPrice,
-    triggerPrice,
-    limitPrice,
-    amount,
-    kind,
-    orderType,
-  };
-}
-
-async function processExchangeOrders(name, exchange, positionRows) {
-  const results = [];
-  try {
-    if (name === 'binance') {
-      const posSymbols = [...new Set(
-        positionRows.filter((p) => p.source === name)
-          .map((p) => p.rawSymbol || `${p.symbol}/USDT:USDT`)
-      )];
-
-      const perSymbol = await Promise.all(posSymbols.map(async (s) => {
-        const [normal, triggers] = await Promise.all([
-          exchange.fetchOpenOrders(s).catch(() => []),
-          exchange.fetchOpenOrders(s, undefined, undefined, { stop: true }).catch(() => []),
-        ]);
-        return [...normal, ...triggers];
-      }));
-      results.push(...perSymbol.flat().map((o) => formatOrder(o, name, exchange)));
-    } else if (name === 'phemex') {
-      const posSymbols = [...new Set(
-        positionRows.filter((p) => p.source === name)
-          .map((p) => p.rawSymbol || `${p.symbol}/USDT:USDT`)
-      )];
-      const perSymbol = await Promise.all(
-        posSymbols.map((s) => exchange.fetchOpenOrders(s).catch(() => []))
-      );
-      results.push(...perSymbol.flat().map((o) => formatOrder(o, name, exchange)));
-    } else {
-      const openOrders = await exchange.fetchOpenOrders().catch(() => []);
-      results.push(...openOrders.map((o) => formatOrder(o, name, exchange)));
-    }
-  } catch (err) {
-    console.error(`❌ ${name} orders:`, err.message);
-  }
-
-  // 过滤无效订单（价格和数量都为 0 → 已成交或无效记录）
-  return results.filter((o) => (o.price > 0 || o.triggerPrice > 0) && o.amount > 0);
-}
-
-function dedupeOrders(orders) {
-  const seen = new Set();
-  return orders.filter((o) => {
-    const key = `${o.exchange}-${o.symbol}-${o.side}-${o.price}-${o.triggerPrice}-${o.amount}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-}
-
-// ---------- 对冲健康度（3 类） ----------
-// Class A: 无 TP/SL 挂单保护
-// Class B: 资费 funding 亏损
-// Class C: 多空 size 或 orders 数量不对齐（不含无 TP/SL 的重复警告）
-function analyzeHedges(result) {
-  const bySymbol = {};
-  for (const r of result) {
-    if (!bySymbol[r.symbol]) bySymbol[r.symbol] = { long: [], short: [] };
-    if (r.side === 'long') bySymbol[r.symbol].long.push(r);
-    else if (r.side === 'short') bySymbol[r.symbol].short.push(r);
-  }
-
-  const noProtection = []; // Class A
-  const fundingLoss = []; // Class B
-  const misaligned = [];  // Class C
-
-  for (const [symbol, sides] of Object.entries(bySymbol)) {
-    const longSize = sides.long.reduce((s, r) => s + Math.abs(r.positionSize), 0);
-    const shortSize = sides.short.reduce((s, r) => s + Math.abs(r.positionSize), 0);
-    const longOrderCount = sides.long.reduce((s, r) => s + (r.tpSlClose?.length || 0), 0);
-    const shortOrderCount = sides.short.reduce((s, r) => s + (r.tpSlClose?.length || 0), 0);
-    const totalOrderCount = longOrderCount + shortOrderCount;
-    const netFunding =
-      sides.long.reduce((s, r) => s + r.totalFunding, 0) +
-      sides.short.reduce((s, r) => s + r.totalFunding, 0);
-
-    const allEntries = [...sides.long, ...sides.short];
-    const hasAnyOrder = allEntries.some((r) => r.tpSlClose?.length);
-
-    // Class A: 无 TP/SL 挂单保护
-    if (!hasAnyOrder && allEntries.length > 0) {
-      noProtection.push({
-        symbol, longSize, shortSize, netFunding,
-        longCount: sides.long.length, shortCount: sides.short.length,
-      });
-    }
-
-    // Class B: funding 亏损
-    if (netFunding < -0.5) {
-      fundingLoss.push({
-        symbol, longSize, shortSize, netFunding,
-        longFunding: sides.long.reduce((s, r) => s + r.totalFunding, 0),
-        shortFunding: sides.short.reduce((s, r) => s + r.totalFunding, 0),
-      });
-    }
-
-    // Class C: size 或 order 不对齐
-    // 注意：不再限制"仅当有 TP/SL 保护时才检查"
-    // ETH 这种无 TP/SL + Size 不对齐应同时在两个分类里显示
-    {
-      const hasPair = sides.long.length && sides.short.length;
-      const problems = [];
-
-      // 裸露敞口（单边）
-      if (!hasPair && allEntries.length > 0) {
-        if (sides.long.length) problems.push(`裸多单，无对冲空头`);
-        else problems.push(`裸空单，无对冲多头`);
+      let equityClass = '';
+      if (lastTotal > 0) {
+        if (data.totalEquity > lastTotal) equityClass = 'pos up';
+        else if (data.totalEquity < lastTotal) equityClass = 'neg down';
       }
 
-      if (hasPair) {
-        // Size 对齐检查：任何绝对差 > 浮点容差都报出来
-        const absDiff = Math.abs(longSize - shortSize);
-        const sizeDiffPct = absDiff / Math.max(longSize, shortSize, 1);
-        if (absDiff > 1e-8) {
-          const dp = (longSize < 1 || shortSize < 1) ? 4 : (longSize < 100 ? 2 : 0);
-          const lFmt = longSize.toLocaleString('en-US', { minimumFractionDigits: dp, maximumFractionDigits: dp });
-          const sFmt = shortSize.toLocaleString('en-US', { minimumFractionDigits: dp, maximumFractionDigits: dp });
-          problems.push(
-            `Size 不对齐: L=${lFmt} vs S=${sFmt} (Δ${(sizeDiffPct * 100).toFixed(3)}%)`
-          );
+      const netPnl = data.result.reduce((s, r) => s + r.unrealizedPnl, 0);
+      const netFund = data.result.reduce((s, r) => s + r.totalFunding, 0);
+      const uniqueSymbols = new Set(data.result.map(r => r.symbol)).size;
+      const totalValue = totalLongVal + totalShortVal;
+      const hh = Math.round(durationHours);
+
+      grid.innerHTML = `
+        <div class="stat-card">
+          <div class="stat-label">Total Equity</div>
+          <div class="stat-value ${equityClass}">$${fmt(data.totalEquity)}</div>
+          <div class="stat-sub">${lastTotal > 0 ? `Δ ${fmt(data.totalEquity - lastTotal)} vs last` : 'First load'}</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Symbols</div>
+          <div class="stat-value">${uniqueSymbols}</div>
+          <div class="stat-sub">Positions ${data.result.length}</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Total Value</div>
+          <div class="stat-value">$${fmt(totalValue)}</div>
+          <div class="stat-sub"><span class="pos">long: $${fmt(totalLongVal)}</span> · <span class="neg">short: $${fmt(totalShortVal)}</span></div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">${hh}h Funding</div>
+          <div class="stat-value ${sign(netFund)}">${fmt(netFund)}</div>
+          <div class="stat-sub">Net uPnL: <span class="${sign(netPnl)}">${fmt(netPnl)}</span></div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Hedge Issues</div>
+          <div class="stat-value">
+            <span class="${(data.hedgeHealth?.noProtection?.length || 0) ? 'neg' : 'dim'}">${data.hedgeHealth?.noProtection?.length || 0}</span>
+            <span class="faint" style="font-size:13px;"> / </span>
+            <span style="color:var(--yellow)">${data.hedgeHealth?.fundingLoss?.length || 0}</span>
+            <span class="faint" style="font-size:13px;"> / </span>
+            <span style="color:var(--orange)">${data.hedgeHealth?.misaligned?.length || 0}</span>
+          </div>
+          <div class="stat-sub">no TP/SL · funding loss · misaligned</div>
+        </div>
+      `;
+    }
+
+    // 从 data.result 里抽取某 symbol 的各腿信息（交易所/side/size/orderCount）
+    function buildLegs(symbol, result) {
+      return result
+        .filter(r => r.symbol === symbol)
+        .map(r => ({
+          exchange: r.source,
+          side: r.side,
+          size: Math.abs(r.positionSize),
+          orderCount: r.tpSlClose?.length || 0,
+        }))
+        .sort((a, b) => {
+          if (a.side !== b.side) return a.side === 'long' ? -1 : 1;
+          return a.exchange.localeCompare(b.exchange);
+        });
+    }
+
+    function renderHealth(hh, allResult) {
+      if (!hh) return;
+      const noP = hh.noProtection || [];
+      const fL = hh.fundingLoss || [];
+      const mA = hh.misaligned || [];
+      if (!noP.length && !fL.length && !mA.length) return;
+
+      document.getElementById('healthPanel').style.display = 'block';
+      document.getElementById('countNoProtection').textContent = noP.length;
+      document.getElementById('countFundingLoss').textContent = fL.length;
+      document.getElementById('countMisaligned').textContent = mA.length;
+
+      // No TP/SL: compact = 5 per row
+      document.getElementById('compactNoP').innerHTML = noP.length
+        ? `<div class="sym-grid-5">${noP.map(i => `<span class="sym-chip">${i.symbol}</span>`).join('')}</div>`
+        : `<div class="health-empty">✓ All symbols protected</div>`;
+
+      document.getElementById('listNoProtection').innerHTML = noP.length
+        ? noP.map(i => `
+            <div class="health-item">
+              <span class="sym">${i.symbol}</span>
+              <span class="dim">L:${fmt(i.longSize, sizeDp(i.longSize))} · S:${fmt(i.shortSize, sizeDp(i.shortSize))}</span>
+              <div class="detail">Net funding: <span class="${sign(i.netFunding)}">${fmt(i.netFunding)}</span> · Legs: ${i.longCount}L/${i.shortCount}S</div>
+            </div>
+          `).join('')
+        : `<div class="health-empty">✓ All symbols protected</div>`;
+
+      // Funding Loss: compact = 3 per row
+      document.getElementById('compactFL').innerHTML = fL.length
+        ? `<div class="sym-grid-3">${fL.map(i => `<span class="sym-chip"><b>${i.symbol}</b><span class="amt neg">${fmt(i.netFunding)}</span></span>`).join('')}</div>`
+        : `<div class="health-empty">✓ Funding positive</div>`;
+
+      document.getElementById('listFundingLoss').innerHTML = fL.length
+        ? fL.map(i => `
+            <div class="health-item">
+              <span class="sym">${i.symbol}</span>
+              <span class="neg">${fmt(i.netFunding)} USDT</span>
+              <div class="detail">L funding: <span class="${sign(i.longFunding)}">${fmt(i.longFunding)}</span> · S funding: <span class="${sign(i.shortFunding)}">${fmt(i.shortFunding)}</span></div>
+            </div>
+          `).join('')
+        : `<div class="health-empty">✓ Funding positive</div>`;
+
+      // Misaligned
+      // Compact (收起态): 每个 symbol 一行简要摘要，Size / Order 问题只显示数字
+      // Expanded (展开态): 每腿详情 (exchange + side + size + orders)
+      const renderMisalignedCompact = (i) => {
+        const parts = [];
+        // 从 problems 里提取 Size 和 Order 信息并简化
+        const sizeProb = i.problems.find(p => p.startsWith('Size'));
+        const orderProb = i.problems.find(p => p.startsWith('Order'));
+        const nakedProb = i.problems.find(p => p.includes('裸'));
+
+        if (nakedProb) {
+          parts.push(`<span class="neg">${nakedProb}</span>`);
         }
-
-        // Order 数量对齐检查：只在至少有一边挂单时检查（双方都没挂单不算 "数量不一致"）
-        if (hasAnyOrder && longOrderCount !== shortOrderCount) {
-          problems.push(
-            `Order 数量不对齐: long=${longOrderCount} 单 vs short=${shortOrderCount} 单`
-          );
+        if (sizeProb) {
+          // "Size 不对齐: L=16.0000 vs S=16.0100 (Δ0.062%)" → "Size: L=16.00 vs S=16.01"
+          const dp = sizeDp(Math.max(i.longSize, i.shortSize));
+          parts.push(`<span>Size: L=${fmt(i.longSize, dp)} vs S=${fmt(i.shortSize, dp)}</span>`);
         }
+        if (orderProb) {
+          parts.push(`<span>Order: long=${i.longOrderCount} vs short=${i.shortOrderCount}</span>`);
+        }
+        return `
+          <div class="misalign-row">
+            <span class="sym">${i.symbol}</span>
+            <span class="misalign-parts">${parts.join(' · ')}</span>
+          </div>
+        `;
+      };
+
+      const renderMisalignedExpanded = (i) => {
+        const legs = buildLegs(i.symbol, allResult);
+        const legRows = legs.map(l => `
+          <span class="leg-ex">${l.exchange}</span>
+          <span class="leg-side ${l.side}">${l.side}</span>
+          <span class="leg-size">${fmt(l.size, sizeDp(l.size))}</span>
+          <span class="leg-orders">${l.orderCount} orders</span>
+        `).join('');
+        return `
+          <div class="health-item">
+            <span class="sym">${i.symbol}</span>
+            <span class="dim">Total: L ${fmt(i.longSize, sizeDp(i.longSize))} vs S ${fmt(i.shortSize, sizeDp(i.shortSize))}</span>
+            <div class="detail">${i.problems.join(' · ')}</div>
+            <div class="leg-grid">${legRows}</div>
+          </div>
+        `;
+      };
+
+      document.getElementById('compactMA').innerHTML = mA.length
+        ? mA.map(renderMisalignedCompact).join('')
+        : `<div class="health-empty">✓ All aligned</div>`;
+
+      document.getElementById('listMisaligned').innerHTML = mA.length
+        ? mA.map(renderMisalignedExpanded).join('')
+        : `<div class="health-empty">✓ All aligned</div>`;
+    }
+
+    function renderEquity(data) {
+      const body = document.getElementById('equityBody');
+      const foot = document.getElementById('equityFoot');
+      body.innerHTML = '';
+
+      let t = { fut: 0, spotFund: 0, total: 0, long: 0, short: 0 };
+      let totalLongVal = 0, totalShortVal = 0;
+
+      for (const [ex, eq] of Object.entries(data.equityOverview)) {
+        const longSum = data.result.filter(r => r.source === ex && r.side === 'long').reduce((s, r) => s + r.positionValue, 0);
+        const shortSum = data.result.filter(r => r.source === ex && r.side === 'short').reduce((s, r) => s + r.positionValue, 0);
+        totalLongVal += longSum; totalShortVal += shortSum;
+
+        const futU = eq.futures?.USDT || 0, futC = eq.futures?.USDC || 0;
+        const spotU = eq.spot?.USDT || 0, spotC = eq.spot?.USDC || 0;
+        const fundU = eq.funding?.USDT || 0, fundC = eq.funding?.USDC || 0;
+
+        const futTotal = futU + futC;
+        const spotFundTotal = spotU + spotC + fundU + fundC;
+
+        t.fut += futTotal;
+        t.spotFund += spotFundTotal;
+        t.total += eq.total || 0;
+        t.long += longSum;
+        t.short += shortSum;
+
+        // 始终显示 breakdown（保持每行高度一致）
+        const futBreakdown = `<div class="breakdown">USDT ${fmt(futU)} · USDC ${fmt(futC)}</div>`;
+        const sfBreakdown = `<div class="breakdown">Spot ${fmt(spotU + spotC)} · Fund ${fmt(fundU + fundC)}</div>`;
+
+        const row = document.createElement('tr');
+        row.innerHTML = `
+          <td><b>${ex}</b></td>
+          <td class="num ${futTotal ? '' : 'faint'}">${fmt(futTotal)}${futBreakdown}</td>
+          <td class="num ${spotFundTotal ? '' : 'faint'}">${fmt(spotFundTotal)}${sfBreakdown}</td>
+          <td class="num"><b>${fmt(eq.total || 0)}</b></td>
+          <td class="num pos">${fmt(longSum)}</td>
+          <td class="num neg">${fmt(shortSum)}</td>
+        `;
+        body.appendChild(row);
       }
 
-      if (problems.length) {
-        misaligned.push({
-          symbol, longSize, shortSize,
-          longOrderCount, shortOrderCount, totalOrderCount,
-          netFunding, problems,
+      foot.innerHTML = `
+        <tr>
+          <td><b>Total</b></td>
+          <td class="num"><b>${fmt(t.fut)}</b></td>
+          <td class="num"><b>${fmt(t.spotFund)}</b></td>
+          <td class="num"><b>${fmt(t.total)}</b></td>
+          <td class="num pos"><b>${fmt(t.long)}</b></td>
+          <td class="num neg"><b>${fmt(t.short)}</b></td>
+        </tr>
+      `;
+      return { totalLongVal, totalShortVal };
+    }
+
+    function renderFunding(data) {
+      const body = document.getElementById('fundingBody');
+      body.innerHTML = '';
+
+      const grouped = {};
+      for (const it of data.result) (grouped[it.symbol] ||= []).push(it);
+      const symbols = Object.keys(grouped).sort();
+
+      let sumPosValue = 0, sumUpnl = 0, sumFunding = 0;
+
+      for (const sym of symbols) {
+        const entries = grouped[sym];
+        entries.sort((a, b) => a.side === 'short' ? -1 : b.side === 'short' ? 1 : 0);
+        const symTotalFund = entries.reduce((s, e) => s + e.totalFunding, 0);
+
+        entries.forEach((e, idx) => {
+          sumPosValue += e.positionValue;
+          sumUpnl += e.unrealizedPnl;
+          sumFunding += e.totalFunding;
+
+          const tr = document.createElement('tr');
+          let html = '';
+          if (idx === 0) {
+            html += `<td class="symbol-cell" rowspan="${entries.length}">${sym}</td>`;
+            html += `<td class="total-cell ${symTotalFund >= 0 ? 'positive' : 'negative'}" rowspan="${entries.length}">${fmt(symTotalFund)}</td>`;
+          }
+
+          const recs = (e.fundingRecords || []).map(v => {
+            const c = v > 0 ? 'pos' : v < 0 ? 'neg' : 'dim';
+            return `<span class="${c}">${fmt(v)}</span>`;
+          }).join('');
+
+          // Orders: [side] [KIND] [price] [×amount]  全部右对齐
+          let ordersHtml = '<span class="faint">—</span>';
+          if (e.tpSlClose?.length) {
+            ordersHtml = `<div class="orders">` +
+              e.tpSlClose.map(o => {
+                const kind = o.kind || 'LIMIT';
+                const price = o.triggerPrice > 0 ? o.triggerPrice : o.price;
+                const dp = price >= 100 ? 2 : price >= 1 ? 4 : price >= 0.01 ? 5 : 6;
+                const amtDp = (o.amount > 0 && o.amount < 1) ? 4 : 0;
+                return `
+                  <span class="o-cell o-side ${o.side}">${o.side}</span>
+                  <span class="o-kind ${kind}">${kind}</span>
+                  <span class="o-cell o-price">${fmt(price, dp)}</span>
+                  <span class="o-cell o-amount">×${fmt(o.amount, amtDp)}</span>
+                `;
+              }).join('') +
+              `</div>`;
+          }
+
+          html += `
+            <td class="dim">${e.source}</td>
+            <td class="num">${fmt(e.currentPrice, 4)}</td>
+            <td class="center ${e.side}">${e.side}</td>
+            <td class="num">${fmt(e.positionSize, sizeDp(e.positionSize))}</td>
+            <td class="num">${fmt(e.positionValue)}</td>
+            <td class="num ${sign(e.unrealizedPnl)}">${fmt(e.unrealizedPnl)}</td>
+            <td class="center dim">${e.count}</td>
+            <td><div class="funding-grid">${recs}</div></td>
+            <td class="num ${sign(e.totalFunding)}">${fmt(e.totalFunding)}</td>
+            <td class="orders-cell">${ordersHtml}</td>
+          `;
+          tr.innerHTML = html;
+          body.appendChild(tr);
         });
       }
-    }
-  }
 
-  // 排序：funding 亏损按绝对值大排前，misaligned 按 size 差异大排前
-  fundingLoss.sort((a, b) => a.netFunding - b.netFunding);
-  misaligned.sort((a, b) => {
-    const aDiff = Math.abs(a.longSize - a.shortSize) / Math.max(a.longSize, a.shortSize, 1);
-    const bDiff = Math.abs(b.longSize - b.shortSize) / Math.max(b.longSize, b.shortSize, 1);
-    return bDiff - aDiff;
-  });
-  noProtection.sort((a, b) => b.longSize + b.shortSize - (a.longSize + a.shortSize));
-
-  return { noProtection, fundingLoss, misaligned };
-}
-
-// ---------- 主 ----------
-module.exports = async (req, res) => {
-  const t0 = Date.now();
-  const exchanges = buildExchanges();
-  const nowMs = Date.now();
-  const sinceMs = nowMs - FUNDING_WINDOW_MS;
-  const exchangeList = Object.entries(exchanges);
-
-  try {
-    const perExchangePromises = exchangeList.map(async ([name, exchange]) => {
-      try { await exchange.loadMarkets(); }
-      catch (err) { console.error(`❌ ${name} loadMarkets:`, err.message); }
-
-      const [equity, positions] = await Promise.all([
-        BALANCE_FETCHERS[name](exchange).catch((err) => {
-          console.error(`❌ ${name} balance:`, err.message);
-          return emptyWallet();
-        }),
-        processExchangePositions(name, exchange, nowMs, sinceMs),
-      ]);
-      return { name, equity, positions };
-    });
-
-    const perExchange = await Promise.all(perExchangePromises);
-
-    const equityOverview = {};
-    const result = [];
-    for (const { name, equity, positions } of perExchange) {
-      equityOverview[name] = equity;
-      result.push(...positions);
+      document.getElementById('sumPosValue').textContent = fmt(sumPosValue);
+      const upnlEl = document.getElementById('sumUpnl');
+      upnlEl.textContent = fmt(sumUpnl);
+      upnlEl.className = 'num ' + sign(sumUpnl);
+      const fundEl = document.getElementById('sumFunding');
+      fundEl.textContent = fmt(sumFunding);
+      fundEl.className = 'num ' + sign(sumFunding);
     }
 
-    const phemexUnrealized = result
-      .filter((r) => r.source === 'phemex')
-      .reduce((s, r) => s + (r.unrealizedPnl || 0), 0);
-    if (equityOverview.phemex) {
-      equityOverview.phemex.total += phemexUnrealized;
-      equityOverview.phemex.unrealizedPnl = phemexUnrealized;
-    }
+    fetch('/api/funding')
+      .then(r => r.json())
+      .then(data => {
+        clearInterval(timer);
+        // 保留 #loadTime 的 DOM 结构，仅更新文本内容（方便外部 scraper 抓取）
+        const lt = document.getElementById('loadTime');
+        const ls = document.getElementById('loadStatus');
+        const spinner = ls.querySelector('.spinner');
+        if (spinner) spinner.remove();
+        ls.classList.remove('loading');
+        ls.classList.add('ok');
+        lt.textContent = `✓ Loaded in ${seconds}s${data.elapsedMs ? ` (server: ${data.elapsedMs}ms)` : ''}`;
 
-    // Orders
-    const orderPromises = exchangeList.map(([name, exchange]) =>
-      processExchangeOrders(name, exchange, result)
-    );
-    const ordersPerExchange = await Promise.all(orderPromises);
-    const dedupedOrders = dedupeOrders(ordersPerExchange.flat());
+        if (!data.success || !Array.isArray(data.result)) {
+          ls.classList.remove('ok');
+          ls.classList.add('error');
+          lt.textContent = '✗ Failed to load data';
+          return;
+        }
 
-    const orderIndex = new Map();
-    for (const o of dedupedOrders) {
-      const key = `${o.exchange}|${o.symbol.toUpperCase()}`;
-      if (!orderIndex.has(key)) orderIndex.set(key, []);
-      orderIndex.get(key).push({
-        side: o.side,
-        price: o.price,
-        triggerPrice: o.triggerPrice,
-        limitPrice: o.limitPrice,
-        amount: o.amount,
-        kind: o.kind,
-        orderType: o.orderType,
+        let minS = null, maxE = null;
+        for (const e of data.result) {
+          const s = parseSGDateString(e.startTime);
+          const ee = parseSGDateString(e.endTime);
+          if (!minS || s < minS) minS = s;
+          if (!maxE || ee > maxE) maxE = ee;
+        }
+        let durHours = 24;
+        if (minS && maxE) {
+          durHours = (maxE - minS) / 3600000;
+          const days = (durHours / 24).toFixed(1);
+          document.getElementById('globalDuration').textContent =
+            `📅 ${days}d · ${formatCompact(minS)} → ${formatCompact(maxE)}`;
+        }
+        document.getElementById('updateTime').textContent = `🕐 ${new Date().toLocaleTimeString('en-SG')}`;
+
+        const { totalLongVal, totalShortVal } = renderEquity(data);
+        renderStats(data, totalLongVal, totalShortVal, durHours);
+        renderHealth(data.hedgeHealth, data.result);
+        renderFunding(data);
+      })
+      .catch(err => {
+        clearInterval(timer);
+        console.error(err);
+        const lt = document.getElementById('loadTime');
+        const ls = document.getElementById('loadStatus');
+        const spinner = ls.querySelector('.spinner');
+        if (spinner) spinner.remove();
+        ls.classList.remove('loading');
+        ls.classList.add('error');
+        lt.textContent = `✗ Error: ${err.message}`;
       });
-    }
-    for (const pos of result) {
-      const key = `${pos.source}|${pos.symbol.toUpperCase()}`;
-      const related = orderIndex.get(key);
-      if (related?.length) pos.tpSlClose = related;
-    }
-
-    // 健康分析放在 orders 挂完之后，才能拿到 order count
-    const hedgeHealth = analyzeHedges(result);
-
-    const totalEquity = Object.values(equityOverview).reduce(
-      (s, ex) => s + (ex.total || 0), 0
-    );
-
-    const elapsed = Date.now() - t0;
-    console.log(
-      `✅ ${elapsed}ms | pos=${result.length} | noTP=${hedgeHealth.noProtection.length} | fundLoss=${hedgeHealth.fundingLoss.length} | misalign=${hedgeHealth.misaligned.length}`
-    );
-
-    res.status(200).json({
-      success: true,
-      result,
-      equityOverview,
-      totalEquity,
-      hedgeHealth,
-      elapsedMs: elapsed,
-    });
-  } catch (e) {
-    console.error('❌ Error:', e);
-    res.status(500).json({ error: e.message });
-  }
-};
+  </script>
+</body>
+</html>
