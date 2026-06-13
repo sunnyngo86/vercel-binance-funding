@@ -66,6 +66,26 @@ function buildExchanges() {
       enableRateLimit: true,
       options: { defaultType: 'swap' },
     }),
+    aster: new ccxt.aster({
+      // ⚠️ Aster 是 DEX，CCXT v4.5.52+ 用 V3：要 L1 钱包私钥（0x + 64 hex = 66 字符）
+      // 兼容多个变量名：优先 ASTER_PRIVATE_KEY，其次你之前存的 ASTER_API_SECRET
+      privateKey: process.env.ASTER_PRIVATE_KEY || process.env.ASTER_API_SECRET,
+      enableRateLimit: true,
+      // ⚠️ CCXT aster 只支持 'swap' / 'spot'，不支持 'future'（传 future 会让 fetchBalance 崩）
+      options: {
+        defaultType: 'swap',
+        warnOnFetchOpenOrdersWithoutSymbol: false,
+      },
+    }),
+    bitget: new ccxt.bitget({
+      apiKey: process.env.BITGET_API_KEY,
+      secret: process.env.BITGET_API_SECRET,
+      // ⚠️ Bitget 强制要求第三个凭证：passphrase（创建 API key 时自己设的）
+      // CCXT 里字段名叫 password。Vercel 需新增 BITGET_API_PASSPHRASE
+      password: process.env.BITGET_API_PASSPHRASE,
+      enableRateLimit: true,
+      options: { defaultType: 'swap' },
+    }),
   };
 }
 
@@ -179,11 +199,95 @@ async function fetchMexcEquity(ex) {
   return w;
 }
 
+// Aster V3 (DEX)：CCXT 只支持 type='swap'/'spot'，不支持 'future'
+// swap 余额响应是数组: [{ asset, balance, crossWalletBalance, availableBalance, ... }]
+// CCXT parseBalance 会把它转成统一格式，total = balance 字段
+async function fetchAsterEquity(ex) {
+  const w = emptyWallet();
+  const [swapBal, spotBal] = await Promise.all([
+    ex.fetchBalance({ type: 'swap' }).catch((e) => {
+      console.error('❌ aster swap balance:', e.message);
+      return {};
+    }),
+    ex.fetchBalance({ type: 'spot' }).catch(() => ({})),
+  ]);
+
+  // 调试：确认结构（正常后可删）
+  console.log('🔍 aster swap total:', JSON.stringify(swapBal?.total || {}));
+
+  // 优先用原始 info 数组里的 balance / crossWalletBalance（更接近"权益"）
+  const infoArr = Array.isArray(swapBal?.info) ? swapBal.info : null;
+  if (infoArr) {
+    for (const b of infoArr) {
+      // balance = 钱包余额, crossWalletBalance 通常等于或接近 balance
+      const val = num(b.balance || b.crossWalletBalance || b.availableBalance);
+      if (b.asset === 'USDT') w.futures.USDT = val;
+      if (b.asset === 'USDC') w.futures.USDC = val;
+    }
+  }
+  // fallback: CCXT 统一字段 total
+  if (!w.futures.USDT && !w.futures.USDC) {
+    w.futures.USDT = num(swapBal?.total?.USDT);
+    w.futures.USDC = num(swapBal?.total?.USDC);
+  }
+
+  // spot 余额（V3 sapi）
+  w.spot.USDT = num(spotBal?.total?.USDT);
+  w.spot.USDC = num(spotBal?.total?.USDC);
+
+  w.total = sumWallet(w);
+  return w;
+}
+
+// Bitget V2 Mix：swap 余额 data[] 数组，每项 { marginCoin, accountEquity, usdtEquity, ... }
+// USDT-M 和 USDC-M 是不同 productType，分别查询
+async function fetchBitgetEquity(ex) {
+  const w = emptyWallet();
+  const [usdtSwap, usdcSwap, spotBal] = await Promise.all([
+    // 默认 productType = USDT-FUTURES
+    ex.fetchBalance({ type: 'swap' }).catch((e) => {
+      console.error('❌ bitget USDT swap balance:', e.message);
+      return {};
+    }),
+    // USDC 本位合约要显式传 productType
+    ex.fetchBalance({ type: 'swap', productType: 'USDC-FUTURES' }).catch(() => ({})),
+    ex.fetchBalance({ type: 'spot' }).catch(() => ({})),
+  ]);
+
+  // 调试：首次部署确认结构（正常后可删）
+  console.log('🔍 bitget swap total:', JSON.stringify(usdtSwap?.total || {}));
+
+  // 原始 info.data[] 里 accountEquity 是该保证金币种的账户权益（含未实现盈亏）
+  const parseMixList = (bal, coin) => {
+    const list = bal?.info?.data;
+    if (Array.isArray(list)) {
+      const entry = list.find((d) => d.marginCoin === coin);
+      if (entry) return num(entry.accountEquity || entry.usdtEquity || entry.available);
+    }
+    return 0;
+  };
+
+  w.futures.USDT = parseMixList(usdtSwap, 'USDT');
+  w.futures.USDC = parseMixList(usdcSwap, 'USDC');
+
+  // fallback: CCXT 统一字段
+  if (!w.futures.USDT) w.futures.USDT = num(usdtSwap?.total?.USDT);
+  if (!w.futures.USDC) w.futures.USDC = num(usdcSwap?.total?.USDC);
+
+  w.spot.USDT = num(spotBal?.total?.USDT);
+  w.spot.USDC = num(spotBal?.total?.USDC);
+
+  w.total = sumWallet(w);
+  return w;
+}
+
 const BALANCE_FETCHERS = {
   binance: fetchBinanceEquity,
   phemex: fetchPhemexEquity,
   bybit: fetchBybitEquity,
   mexc: fetchMexcEquity,
+  aster: fetchAsterEquity,
+  bitget: fetchBitgetEquity,
 };
 
 // ---------- Ticker ----------
@@ -342,6 +446,7 @@ async function processExchangeOrders(name, exchange, positionRows) {
   const results = [];
   try {
     if (name === 'binance') {
+      // Binance：条件单 (SL/TP) 需要额外用 stop:true 拉取
       const posSymbols = [...new Set(
         positionRows.filter((p) => p.source === name)
           .map((p) => p.rawSymbol || `${p.symbol}/USDT:USDT`)
@@ -355,7 +460,8 @@ async function processExchangeOrders(name, exchange, positionRows) {
         return [...normal, ...triggers];
       }));
       results.push(...perSymbol.flat().map((o) => formatOrder(o, name, exchange)));
-    } else if (name === 'phemex') {
+    } else if (name === 'phemex' || name === 'aster') {
+      // Phemex / Aster(V3)：逐 symbol 查询；V3 OpenOrders 已含 TP/SL，不需 stop:true
       const posSymbols = [...new Set(
         positionRows.filter((p) => p.source === name)
           .map((p) => p.rawSymbol || `${p.symbol}/USDT:USDT`)
