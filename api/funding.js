@@ -1,8 +1,8 @@
 const ccxt = require('ccxt');
 
-const FUNDING_WINDOW_MS = 72.01 * 60 * 60 * 1000;
+const FUNDING_WINDOW_MS = 120.01 * 60 * 60 * 1000; // 5 天
 const FUNDING_PAGE_LIMIT = 100;
-const FUNDING_MAX_PAGES = 3;
+const FUNDING_MAX_PAGES = 8; // 5天/8h = 15 条，多翻几页留 buffer
 const NEGATIVE_FUNDING_SIGN = new Set(['phemex', 'bybit']);
 const COINS = ['USDT', 'USDC'];
 
@@ -24,6 +24,39 @@ const convertMexcOrderSide = (code) => {
 };
 
 const num = (v) => parseFloat(v || 0) || 0;
+
+// 把 CCXT/网络错误归类成人能看懂的简短描述
+// 返回 { type, message } —— type 用于前端配色，message 是给人看的解释
+function classifyError(err, exchangeName) {
+  const name = err?.constructor?.name || err?.name || '';
+  const raw = String(err?.message || err || '').slice(0, 200);
+  const ex = exchangeName ? exchangeName.toUpperCase() : 'Exchange';
+
+  // CCXT 的错误类名很有用，优先按类名判断
+  if (/AuthenticationError|PermissionDenied/i.test(name) ||
+      /api[\s_-]?key|signature|invalid.*key|unauthorized|permission|passphrase|apikey/i.test(raw)) {
+    return { type: 'auth', message: `${ex} 认证失败 (API key 过期/无效/权限不足)` };
+  }
+  if (/RateLimitExceeded|DDoSProtection/i.test(name) ||
+      /rate limit|too many|too much|429|frequenc/i.test(raw)) {
+    return { type: 'ratelimit', message: `${ex} 请求过于频繁 (rate limit / too many requests)` };
+  }
+  if (/RequestTimeout|ETIMEDOUT|ENOTFOUND|ECONNRESET|NetworkError|ExchangeNotAvailable/i.test(name) ||
+      /timeout|timed out|network|ENOTFOUND|ECONNRESET|getaddrinfo|socket hang/i.test(raw)) {
+    return { type: 'network', message: `${ex} 网络超时/无法连接` };
+  }
+  if (/InvalidNonce/i.test(name) || /nonce|timestamp|recv.?window|time.*sync/i.test(raw)) {
+    return { type: 'time', message: `${ex} 时间戳/nonce 错误 (服务器时间不同步)` };
+  }
+  if (/AccountSuspended|AccountNotEnabled/i.test(name) || /suspend|frozen|disabled|not enabled/i.test(raw)) {
+    return { type: 'account', message: `${ex} 账户被冻结/未启用` };
+  }
+  if (/ExchangeError/i.test(name)) {
+    return { type: 'exchange', message: `${ex} 交易所返回错误: ${raw}` };
+  }
+  // 兜底：原始信息
+  return { type: 'unknown', message: `${ex}: ${raw}` };
+}
 
 const emptyWallet = () => ({
   futures: { USDT: 0, USDC: 0 },
@@ -355,7 +388,7 @@ async function processExchangePositions(name, exchange, nowMs, sinceMs) {
       : await exchange.fetchPositions();
   } catch (err) {
     console.error(`❌ ${name} positions:`, err.message);
-    return [];
+    throw err; // 抛给上层，由主流程归类成友好错误信息
   }
 
   const open = positions.filter((p) => p.contracts && p.contracts > 0);
@@ -391,9 +424,17 @@ async function processExchangePositions(name, exchange, nowMs, sinceMs) {
       unrealizedPnl,
       count: allFunding.length,
       totalFunding,
+      // 纯金额数组（向后兼容现有显示）
       fundingRecords: allFunding.map((f) => num(f.amount) * signFlip),
+      // 带时间戳的明细（供前端按 8h/16h/1d/3d/5d 窗口筛选重算）
+      fundingDetail: allFunding.map((f) => ({
+        ts: f.timestamp,
+        amount: num(f.amount) * signFlip,
+      })),
       startTime: toSGTime(sinceMs),
       endTime: toSGTime(nowMs),
+      windowMs: FUNDING_WINDOW_MS,
+      serverNow: nowMs,
     };
   }));
 
@@ -603,18 +644,47 @@ module.exports = async (req, res) => {
   const exchangeList = Object.entries(exchanges);
 
   try {
+    // 每个交易所独立处理：任一失败只 skip 它自己，记录错误，不影响其他
+    const exchangeStatus = {}; // { name: { ok, error, errorType } }
+
     const perExchangePromises = exchangeList.map(async ([name, exchange]) => {
-      try { await exchange.loadMarkets(); }
-      catch (err) { console.error(`❌ ${name} loadMarkets:`, err.message); }
+      // Step 1: loadMarkets —— 失败则整个交易所 skip（后续都依赖 markets）
+      try {
+        await exchange.loadMarkets();
+      } catch (err) {
+        const { type, message } = classifyError(err, name);
+        console.error(`❌ ${name} loadMarkets:`, err.message);
+        exchangeStatus[name] = { ok: false, error: message, errorType: type };
+        return { name, equity: emptyWallet(), positions: [], failed: true };
+      }
+
+      // Step 2: balance + positions 各自独立容错
+      let equityErr = null;
+      let posErr = null;
 
       const [equity, positions] = await Promise.all([
         BALANCE_FETCHERS[name](exchange).catch((err) => {
+          equityErr = err;
           console.error(`❌ ${name} balance:`, err.message);
           return emptyWallet();
         }),
-        processExchangePositions(name, exchange, nowMs, sinceMs),
+        processExchangePositions(name, exchange, nowMs, sinceMs).catch((err) => {
+          posErr = err;
+          console.error(`❌ ${name} positions:`, err.message);
+          return [];
+        }),
       ]);
-      return { name, equity, positions };
+
+      // 记录状态：balance 或 positions 任一出错就标记（balance 更关键，优先报它）
+      const firstErr = equityErr || posErr;
+      if (firstErr) {
+        const { type, message } = classifyError(firstErr, name);
+        exchangeStatus[name] = { ok: false, error: message, errorType: type };
+      } else {
+        exchangeStatus[name] = { ok: true, error: null, errorType: null };
+      }
+
+      return { name, equity, positions, failed: false };
     });
 
     const perExchange = await Promise.all(perExchangePromises);
@@ -634,10 +704,19 @@ module.exports = async (req, res) => {
       equityOverview.phemex.unrealizedPnl = phemexUnrealized;
     }
 
-    // Orders
-    const orderPromises = exchangeList.map(([name, exchange]) =>
-      processExchangeOrders(name, exchange, result)
-    );
+    // Orders —— 每个交易所独立容错，失败不影响其他
+    const orderPromises = exchangeList.map(async ([name, exchange]) => {
+      // loadMarkets 已失败的交易所直接跳过订单查询
+      if (exchangeStatus[name] && !exchangeStatus[name].ok && exchangeStatus[name].errorType) {
+        // 已经有错误记录，但 orders 失败不覆盖更重要的 balance 错误
+      }
+      try {
+        return await processExchangeOrders(name, exchange, result);
+      } catch (err) {
+        console.error(`❌ ${name} orders:`, err.message);
+        return [];
+      }
+    });
     const ordersPerExchange = await Promise.all(orderPromises);
     const dedupedOrders = dedupeOrders(ordersPerExchange.flat());
 
@@ -668,9 +747,16 @@ module.exports = async (req, res) => {
       (s, ex) => s + (ex.total || 0), 0
     );
 
+    // 汇总失败的交易所列表（给前端显示）
+    const failedExchanges = Object.entries(exchangeStatus)
+      .filter(([, s]) => !s.ok)
+      .map(([name, s]) => ({ name, error: s.error, errorType: s.errorType }));
+
     const elapsed = Date.now() - t0;
+    const okCount = Object.values(exchangeStatus).filter((s) => s.ok).length;
     console.log(
-      `✅ ${elapsed}ms | pos=${result.length} | noTP=${hedgeHealth.noProtection.length} | fundLoss=${hedgeHealth.fundingLoss.length} | misalign=${hedgeHealth.misaligned.length}`
+      `✅ ${elapsed}ms | exchanges ok=${okCount}/${exchangeList.length} | pos=${result.length}` +
+      (failedExchanges.length ? ` | failed: ${failedExchanges.map(f => f.name).join(',')}` : '')
     );
 
     res.status(200).json({
@@ -679,10 +765,15 @@ module.exports = async (req, res) => {
       equityOverview,
       totalEquity,
       hedgeHealth,
+      exchangeStatus,      // 每个交易所 { ok, error, errorType }
+      failedExchanges,     // 仅失败的，方便前端直接显示
+      serverNow: nowMs,    // 服务器抓取时刻，前端按此算时间窗口
+      windowMs: FUNDING_WINDOW_MS, // 数据覆盖的最大窗口 (5天)
       elapsedMs: elapsed,
     });
   } catch (e) {
-    console.error('❌ Error:', e);
-    res.status(500).json({ error: e.message });
+    // 这里只会捕获非交易所级的意外错误（如代码 bug）
+    console.error('❌ Fatal Error:', e);
+    res.status(500).json({ success: false, error: classifyError(e).message, raw: e.message });
   }
 };
