@@ -2,8 +2,24 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>Funding Fee Overview</title>
+
+  <!-- ===== PWA: 可安装成桌面 App ===== -->
+  <meta name="theme-color" content="#0969da" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <!-- iOS Safari: 添加到主屏幕后全屏独立运行 -->
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <meta name="apple-mobile-web-app-title" content="Funding" />
+  <!-- manifest（标准 PWA 安装入口，引用同目录真实文件）-->
+  <link rel="manifest" href="manifest.json" />
+  <!-- App 图标：真实 PNG 文件优先 -->
+  <link rel="icon" type="image/png" href="icon-192.png" />
+  <link rel="apple-touch-icon" href="icon-180.png" />
+  <!-- 内联兜底图标 -->
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E%3Crect width='512' height='512' rx='96' fill='%230969da'/%3E%3Crect x='120' y='280' width='56' height='120' rx='8' fill='%23ffffff'/%3E%3Crect x='228' y='200' width='56' height='200' rx='8' fill='%23ffffff'/%3E%3Crect x='336' y='130' width='56' height='270' rx='8' fill='%23ffffff'/%3E%3C/svg%3E" />
+
   <style>
     :root {
       --bg: #f9f9f9;
@@ -45,6 +61,62 @@
 
     /* 错误横幅 */
     #errorBanner { margin-bottom: 1rem; }
+    #errorBanner:empty { display: none; }
+
+    /* 全局时间窗口筛选 */
+    .window-filter {
+      display: flex; align-items: center; gap: 12px;
+      margin-bottom: 1.25rem; flex-wrap: wrap;
+    }
+    .wf-label { font-size: 12px; color: var(--text-dim); font-weight: 600; }
+    .wf-buttons { display: inline-flex; gap: 4px; background: var(--surface-alt); padding: 3px; border-radius: 8px; border: 1px solid var(--border); }
+    .wf-buttons button {
+      border: none; background: transparent; cursor: pointer;
+      padding: 5px 14px; border-radius: 6px; font-size: 13px; font-weight: 600;
+      color: var(--text-dim); transition: all 0.12s;
+    }
+    .wf-buttons button:hover { color: var(--text); background: rgba(0,0,0,0.04); }
+    .wf-buttons button.active { background: var(--blue); color: #fff; }
+
+    /* Copy JSON 按钮 */
+    .copy-json-btn {
+      border: 1px solid var(--border); background: var(--surface); cursor: pointer;
+      padding: 6px 14px; border-radius: 8px; font-size: 13px; font-weight: 600;
+      color: var(--text-dim); transition: all 0.12s; margin-left: 4px;
+    }
+    .copy-json-btn:hover { border-color: var(--blue); color: var(--blue); }
+    .copy-json-btn.copied { background: var(--green); border-color: var(--green); color: #fff; }
+
+    /* Positions 工具栏 */
+    .fund-toolbar {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 16px; padding: 12px 16px; border-bottom: 1px solid var(--border);
+      background: var(--surface); flex-wrap: wrap;
+    }
+    .tb-label { font-size: 12px; color: var(--text-dim); font-weight: 600; margin-right: 6px; }
+    .exch-filter { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+    .exch-filter button {
+      border: 1px solid var(--border); background: var(--surface); cursor: pointer;
+      padding: 4px 12px; border-radius: 999px; font-size: 12px; font-weight: 600;
+      color: var(--text-dim); text-transform: capitalize; transition: all 0.12s;
+    }
+    .exch-filter button:hover { border-color: var(--text-faint); color: var(--text); }
+    .exch-filter button.active { background: var(--blue); border-color: var(--blue); color: #fff; }
+    .exch-filter button.all-btn.active { background: var(--text); border-color: var(--text); }
+
+    .coin-search { position: relative; display: inline-flex; align-items: center; }
+    .coin-search input {
+      border: 1px solid var(--border); border-radius: 8px; padding: 6px 30px 6px 12px;
+      font-size: 13px; width: 200px; outline: none; color: var(--text); background: var(--surface);
+    }
+    .coin-search input:focus { border-color: var(--blue); }
+    .coin-clear {
+      position: absolute; right: 8px; cursor: pointer; color: var(--text-faint);
+      font-size: 12px; display: none; user-select: none;
+    }
+    .coin-search.has-value .coin-clear { display: inline; }
+
+    .no-match-row td { text-align: center; color: var(--text-faint); padding: 24px; font-size: 13px; }
     #errorBanner:empty { display: none; }
     .err-card {
       display: flex;
@@ -262,6 +334,19 @@
     <!-- 交易所错误横幅：API 过期/限流等会显示在这里 -->
     <div id="errorBanner"></div>
 
+    <!-- 全局时间窗口筛选：影响所有 funding 计算 -->
+    <div class="window-filter">
+      <span class="wf-label">⏱ Funding 窗口:</span>
+      <div class="wf-buttons" id="windowButtons">
+        <button data-h="8">8h</button>
+        <button data-h="16">16h</button>
+        <button data-h="24">1d</button>
+        <button data-h="72">3d</button>
+        <button data-h="120" class="active">5d</button>
+      </div>
+      <button id="copyJsonBtn" class="copy-json-btn" title="复制当前数据为 JSON (固定 1 天 funding)">📋 Copy JSON</button>
+    </div>
+
     <div class="stats" id="statsGrid"></div>
 
     <!-- Health panel -->
@@ -342,6 +427,17 @@
         <span class="chevron">▼</span>
       </div>
       <div class="panel-body" id="fundingPanel">
+        <!-- 工具栏：交易所筛选 + 币种搜索 -->
+        <div class="fund-toolbar">
+          <div class="exch-filter" id="exchFilter">
+            <span class="tb-label">交易所:</span>
+            <!-- 按钮由 JS 动态生成 -->
+          </div>
+          <div class="coin-search">
+            <input type="text" id="coinSearch" placeholder="🔍 搜索币种 (如 BTC)..." autocomplete="off" />
+            <span id="coinSearchClear" class="coin-clear" title="清除">✕</span>
+          </div>
+        </div>
         <div class="table-scroll">
           <table>
             <thead>
@@ -436,10 +532,15 @@
       }
     }
 
+    let _equitySnapshotTaken = false;
     function renderStats(data, totalLongVal, totalShortVal, durationHours) {
       const grid = document.getElementById('statsGrid');
       const lastTotal = parseFloat(localStorage.getItem('lastTotalEquity') || '0');
-      localStorage.setItem('lastTotalEquity', data.totalEquity);
+      // 只在本次页面加载的首次渲染记录快照，避免筛选切换时涨跌箭头乱跳
+      if (!_equitySnapshotTaken) {
+        localStorage.setItem('lastTotalEquity', data.totalEquity);
+        _equitySnapshotTaken = true;
+      }
 
       let equityClass = '';
       if (lastTotal > 0) {
@@ -826,10 +927,10 @@
         }
         document.getElementById('updateTime').textContent = `🕐 ${new Date().toLocaleTimeString('en-SG')}`;
 
-        const { totalLongVal, totalShortVal } = renderEquity(data);
-        renderStats(data, totalLongVal, totalShortVal, durHours);
-        renderHealth(data.hedgeHealth, data.result);
-        renderFunding(data);
+        // 保存原始数据，初始化筛选控件，首次渲染
+        RAW = data;
+        initFilters(data);
+        applyFilters();
       })
       .catch(err => {
         clearInterval(timer);
@@ -857,6 +958,303 @@
             </div>
           </div>`;
       });
+
+    // ============================================================
+    //  筛选引擎：时间窗口 / 交易所 / 币种搜索
+    // ============================================================
+    let RAW = null;                 // 后端原始响应
+    const FILTER = {
+      windowH: 120,                 // 时间窗口（小时），默认 5d
+      exchange: 'all',              // 选中的交易所，'all' = 全部
+      coin: '',                     // 币种搜索词
+    };
+
+    // 根据选中的时间窗口，重算每个 position 的 funding（从 fundingDetail 截取）
+    function recomputeForWindow(rawResult, serverNow, windowH) {
+      const cutoff = serverNow - windowH * 3600 * 1000;
+      return rawResult.map(p => {
+        // fundingDetail 是 [{ts, amount}]；没有就退回用全量 fundingRecords
+        let recs, total;
+        if (Array.isArray(p.fundingDetail)) {
+          const within = p.fundingDetail.filter(f => f.ts >= cutoff);
+          recs = within.map(f => f.amount);
+          total = within.reduce((s, f) => s + f.amount, 0);
+        } else {
+          recs = p.fundingRecords || [];
+          total = p.totalFunding || 0;
+        }
+        return { ...p, fundingRecords: recs, totalFunding: total, count: recs.length };
+      });
+    }
+
+    // 交易所筛选：选中某交易所时，只保留"含该交易所腿"的 symbol（连对冲腿一起显示）
+    function filterByExchange(result, exchange) {
+      if (exchange === 'all') return result;
+      const keepSymbols = new Set(
+        result.filter(r => r.source === exchange).map(r => r.symbol)
+      );
+      return result.filter(r => keepSymbols.has(r.symbol));
+    }
+
+    // 币种搜索：symbol 含搜索词（大小写不敏感）
+    function filterByCoin(result, coin) {
+      if (!coin) return result;
+      const q = coin.trim().toUpperCase();
+      if (!q) return result;
+      return result.filter(r => r.symbol.toUpperCase().includes(q));
+    }
+
+    // 重算 hedgeHealth 的 funding loss 分类（按当前窗口的 totalFunding）
+    function recomputeHedgeHealth(rawHealth, filteredResult) {
+      if (!rawHealth) return rawHealth;
+      // 按 symbol 聚合当前窗口的净 funding
+      const netFundBySymbol = {};
+      for (const r of filteredResult) {
+        netFundBySymbol[r.symbol] = (netFundBySymbol[r.symbol] || 0) + (r.totalFunding || 0);
+      }
+      // funding loss：净 funding < -0.5
+      const visibleSymbols = new Set(filteredResult.map(r => r.symbol));
+      const fundingLoss = Object.entries(netFundBySymbol)
+        .filter(([sym, nf]) => nf < -0.5)
+        .map(([sym, nf]) => {
+          const longF = filteredResult.filter(r => r.symbol === sym && r.side === 'long').reduce((s, r) => s + r.totalFunding, 0);
+          const shortF = filteredResult.filter(r => r.symbol === sym && r.side === 'short').reduce((s, r) => s + r.totalFunding, 0);
+          const longSize = filteredResult.filter(r => r.symbol === sym && r.side === 'long').reduce((s, r) => s + Math.abs(r.positionSize), 0);
+          const shortSize = filteredResult.filter(r => r.symbol === sym && r.side === 'short').reduce((s, r) => s + Math.abs(r.positionSize), 0);
+          return { symbol: sym, netFunding: nf, longFunding: longF, shortFunding: shortF, longSize, shortSize };
+        })
+        .sort((a, b) => a.netFunding - b.netFunding);
+
+      // noProtection 和 misaligned 跟时间窗口无关，但要按交易所/币种筛选过滤可见性
+      const noProtection = (rawHealth.noProtection || []).filter(i => visibleSymbols.has(i.symbol));
+      const misaligned = (rawHealth.misaligned || []).filter(i => visibleSymbols.has(i.symbol));
+
+      return { noProtection, fundingLoss, misaligned };
+    }
+
+    // 核心：根据当前 FILTER 派生数据并重渲染
+    function applyFilters() {
+      if (!RAW) return;
+      const serverNow = RAW.serverNow || Date.now();
+
+      // 1. 时间窗口重算
+      let result = recomputeForWindow(RAW.result, serverNow, FILTER.windowH);
+      // 2. 交易所筛选
+      result = filterByExchange(result, FILTER.exchange);
+      // 3. 币种搜索
+      result = filterByCoin(result, FILTER.coin);
+
+      // 重算 health
+      const hedgeHealth = recomputeHedgeHealth(RAW.hedgeHealth, result);
+
+      // 构造一个派生 data 给各 render 函数
+      const derived = { ...RAW, result, hedgeHealth };
+
+      // Equity 表用全量（不受币种/交易所行筛选影响，但仓位汇总按筛选后的 result）
+      const { totalLongVal, totalShortVal } = renderEquity({ ...RAW, result });
+      renderStats({ ...RAW, result, hedgeHealth }, totalLongVal, totalShortVal, FILTER.windowH);
+      renderHealth(hedgeHealth, result);
+      renderFunding(derived);
+
+      // 无匹配提示
+      const body = document.getElementById('fundingBody');
+      if (!result.length) {
+        body.innerHTML = `<tr class="no-match-row"><td colspan="12">没有匹配的币种${FILTER.coin ? ` "${FILTER.coin}"` : ''}${FILTER.exchange !== 'all' ? `（交易所: ${FILTER.exchange}）` : ''}</td></tr>`;
+      }
+    }
+
+    // 初始化筛选控件（交易所按钮动态生成 + 绑定事件）
+    function initFilters(data) {
+      // 时间窗口按钮
+      const winBtns = document.querySelectorAll('#windowButtons button');
+      winBtns.forEach(btn => {
+        btn.onclick = () => {
+          winBtns.forEach(b => b.classList.remove('active'));
+          btn.classList.add('active');
+          FILTER.windowH = parseInt(btn.dataset.h, 10);
+          applyFilters();
+        };
+      });
+
+      // 交易所按钮：从 equityOverview 拿全部交易所名
+      const exchanges = Object.keys(data.equityOverview || {});
+      const ef = document.getElementById('exchFilter');
+      // 保留 label，清掉旧按钮
+      ef.querySelectorAll('button').forEach(b => b.remove());
+      const mkBtn = (name, label, isAll) => {
+        const b = document.createElement('button');
+        b.textContent = label;
+        if (isAll) b.classList.add('all-btn');
+        if ((isAll && FILTER.exchange === 'all') || name === FILTER.exchange) b.classList.add('active');
+        b.onclick = () => {
+          ef.querySelectorAll('button').forEach(x => x.classList.remove('active'));
+          b.classList.add('active');
+          FILTER.exchange = isAll ? 'all' : name;
+          applyFilters();
+        };
+        ef.appendChild(b);
+      };
+      mkBtn('all', 'All', true);
+      exchanges.forEach(ex => mkBtn(ex, ex, false));
+
+      // 币种搜索
+      const input = document.getElementById('coinSearch');
+      const clearBtn = document.getElementById('coinSearchClear');
+      const wrap = input.closest('.coin-search');
+      let debounce;
+      input.oninput = () => {
+        FILTER.coin = input.value;
+        wrap.classList.toggle('has-value', !!input.value);
+        clearTimeout(debounce);
+        debounce = setTimeout(applyFilters, 150);
+      };
+      clearBtn.onclick = () => {
+        input.value = '';
+        FILTER.coin = '';
+        wrap.classList.remove('has-value');
+        applyFilters();
+        input.focus();
+      };
+
+      // Copy JSON 按钮
+      const copyBtn = document.getElementById('copyJsonBtn');
+      if (copyBtn) copyBtn.onclick = copyAsJson;
+    }
+
+    // 生成简化 JSON（funding 固定取 1 天，不受当前窗口筛选影响）
+    function buildExportJson() {
+      if (!RAW) return null;
+      const serverNow = RAW.serverNow || Date.now();
+
+      // 固定 1 天窗口重算 funding
+      let result1d = recomputeForWindow(RAW.result, serverNow, 24);
+      // 套用当前的交易所 / 币种筛选（让导出和你看到的表格一致）
+      result1d = filterByExchange(result1d, FILTER.exchange);
+      result1d = filterByCoin(result1d, FILTER.coin);
+
+      const positions = result1d.map(p => ({
+        symbol: p.symbol,
+        exchange: p.source,
+        side: p.side,
+        unrealizedPnl: round2(p.unrealizedPnl),
+        positionValue: round2(p.positionValue),
+        funding1d: round2(p.totalFunding),
+      }));
+
+      const netFunding1d = round2(result1d.reduce((s, p) => s + (p.totalFunding || 0), 0));
+
+      return {
+        equity: { total: round2(RAW.totalEquity || 0) },
+        netFunding1d,
+        positions,
+      };
+    }
+
+    function round2(n) {
+      return Math.round((Number(n) || 0) * 100) / 100;
+    }
+
+    async function copyAsJson() {
+      const obj = buildExportJson();
+      if (!obj) return;
+      const text = JSON.stringify(obj, null, 2);
+      const btn = document.getElementById('copyJsonBtn');
+      try {
+        await navigator.clipboard.writeText(text);
+      } catch {
+        // 降级：用临时 textarea（http 或旧浏览器）
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        try { document.execCommand('copy'); } catch {}
+        ta.remove();
+      }
+      // 反馈
+      const orig = btn.innerHTML;
+      btn.innerHTML = '✓ Copied!';
+      btn.classList.add('copied');
+      setTimeout(() => {
+        btn.innerHTML = orig;
+        btn.classList.remove('copied');
+      }, 1500);
+    }
+
+    // ============================================================
+    //  PWA：可安装成桌面 App
+    // ============================================================
+    (function setupPWA() {
+      // 1. 注册 Service Worker（PWA 安装的硬性条件，引用同目录 sw.js）
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.register('sw.js').catch(err => {
+          console.warn('SW register failed:', err);
+        });
+      }
+
+      // 2. 安卓 / 桌面 Chrome：捕获安装事件，显示自定义"安装"按钮
+      let deferredPrompt = null;
+      window.addEventListener('beforeinstallprompt', (e) => {
+        e.preventDefault();
+        deferredPrompt = e;
+        showInstallButton();
+      });
+
+      function showInstallButton() {
+        if (document.getElementById('pwaInstallBtn')) return;
+        const btn = document.createElement('button');
+        btn.id = 'pwaInstallBtn';
+        btn.innerHTML = '⬇ 安装 App';
+        btn.style.cssText = [
+          'position:fixed', 'bottom:20px', 'right:20px', 'z-index:9999',
+          'background:#0969da', 'color:#fff', 'border:none', 'border-radius:999px',
+          'padding:12px 20px', 'font-size:14px', 'font-weight:600', 'cursor:pointer',
+          'box-shadow:0 4px 14px rgba(9,105,218,0.4)',
+        ].join(';');
+        btn.onclick = async () => {
+          if (!deferredPrompt) return;
+          deferredPrompt.prompt();
+          const { outcome } = await deferredPrompt.userChoice;
+          if (outcome === 'accepted') btn.remove();
+          deferredPrompt = null;
+        };
+        document.body.appendChild(btn);
+      }
+
+      window.addEventListener('appinstalled', () => {
+        const b = document.getElementById('pwaInstallBtn');
+        if (b) b.remove();
+      });
+
+      // 3. iOS Safari：没有 beforeinstallprompt，提示"添加到主屏幕"
+      const isIOS = /iphone|ipad|ipod/i.test(navigator.userAgent);
+      const isInStandalone = window.navigator.standalone === true ||
+        window.matchMedia('(display-mode: standalone)').matches;
+      if (isIOS && !isInStandalone && !localStorage.getItem('iosA2HSDismissed')) {
+        setTimeout(showIOSHint, 2500);
+      }
+      function showIOSHint() {
+        if (document.getElementById('iosHint')) return;
+        const hint = document.createElement('div');
+        hint.id = 'iosHint';
+        hint.style.cssText = [
+          'position:fixed', 'bottom:16px', 'left:16px', 'right:16px', 'z-index:9999',
+          'background:#fff', 'border:1px solid #d0d7de', 'border-radius:12px',
+          'padding:14px 16px', 'box-shadow:0 6px 20px rgba(0,0,0,0.15)',
+          'font-size:13px', 'color:#1f2328', 'display:flex', 'align-items:center', 'gap:10px',
+        ].join(';');
+        hint.innerHTML =
+          '<span style="font-size:20px;">📲</span>' +
+          '<div style="flex:1;">安装到主屏幕：点底部 <b>分享 ⬆️</b> → <b>添加到主屏幕</b></div>' +
+          '<span id="iosHintClose" style="cursor:pointer;color:#656d76;font-size:18px;padding:0 4px;">✕</span>';
+        document.body.appendChild(hint);
+        document.getElementById('iosHintClose').onclick = () => {
+          hint.remove();
+          localStorage.setItem('iosA2HSDismissed', '1');
+        };
+      }
+    })();
   </script>
 </body>
 </html>
